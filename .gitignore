@@ -1,0 +1,10 @@
+# Local agent state and research notes (may hold internal-only material)
+.omc/
+.isaac/
+.build/
+
+# Local Claude Code settings
+.claude/settings.local.json
+
+# Reference material kept out of git
+Antigravity Plugin Marketplace Publishing Guide.pdf
