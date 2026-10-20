@@ -15,7 +15,8 @@ Work is tracked as issues on the [project board](https://github.com/users/datasc
 ## Status (2026-10-20)
 
 - Done: read the plugin guide (`Antigravity Plugin Marketplace Publishing Guide.pdf`, repo root, git-ignored) (#1); research on Antigravity (#2), Databricks (#3), and the ecosystem (#4); this file (#19); the director subagent (#20).
-- In progress: the first-user question (#5).
+- Decided: the first user and their first question (#5).
+- In progress: nothing yet; the POV (#6) is next.
 - Next, in order: POV (#6) → scope (#7, which also sorts ideas #13–#18 into v0, later, or drop) → sign-in (#8) → demo workspace (#10, the user decides) → design doc (#9) → build (#11) → demo (#12). Building starts after the design doc is approved.
 
 ## What we know
@@ -52,9 +53,12 @@ Work is tracked as issues on the [project board](https://github.com/users/datasc
 - Two apps are installed: Antigravity 2.24.0 (`/Applications/Antigravity.app`) and Antigravity IDE 2.5.5 (`/Applications/Antigravity IDE.app`). Config moved to `~/.gemini/config/`, and `mcp_config.json` there is empty. `agy` is not on PATH.
 - Databricks CLI v1.19.0 is installed. Its `aitools` installer linked 9 Databricks skills into `~/.gemini/antigravity/global_skills/`; the CLI's `libs/aitools/agents/agents.go` treats Antigravity as skills-only. None of the 9 cover Genie. Genie skills exist at `~/.databricks/aitools/skills/databricks-data-discovery` and in the Claude Code Databricks plugin (`databricks-genie-agents`).
 
+## Decisions
+
+- First user (#5): a developer at a Databricks customer standardized on Google's AI tools. They're building in Antigravity against governed data that their data team already serves through a Genie space. Their first question is a business metric the agent would otherwise guess at, e.g. "Top 10 products by revenue last quarter vs. the prior quarter?", then "By region?", with Genie's SQL going into their code. Business users are out of scope. This is the director's call; the user can override it.
+
 ## Open questions
 
-- Who is the first user, and what do they ask Genie first (#5)? Working guess: a developer or data person in Antigravity who wants Genie answers without leaving the IDE.
 - How do users sign in (#8)? Automatic OAuth is out (no dynamic client registration), and a PAT would sit in plain text. That leaves a bridge that reuses the CLI login, or an admin-registered OAuth app.
 - Which workspace and Genie space do we demo on (#10)?
 
