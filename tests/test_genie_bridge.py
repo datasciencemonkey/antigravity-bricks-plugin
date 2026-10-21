@@ -1,0 +1,233 @@
+"""The Genie bridge: a local stdio MCP server that forwards to the Genie One MCP, signed with the Databricks CLI login.
+
+Runs the real bridge under Node against a stand-in `databricks` CLI and a stand-in Genie MCP server.
+"""
+import json
+import os
+import queue
+import subprocess
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+import pytest
+
+BRIDGE = Path(__file__).resolve().parent.parent / "plugins" / "databricks-genie" / "scripts" / "genie-bridge.mjs"
+INITIALIZE = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+              "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}}
+TOOLS_LIST = {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
+INITIALIZED = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+
+
+class FakeGenie:
+    """Records each request; `reply(request) -> (status, headers, body)` decides the response."""
+
+    def __init__(self):
+        self.requests = []
+        self.reply = lambda request: (200, {"Content-Type": "application/json"},
+                                      json.dumps({"jsonrpc": "2.0", "id": request["body"].get("id"), "result": {"ok": True}}))
+        fake = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                request = {"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()}, "body": body}
+                fake.requests.append(request)
+                status, headers, payload = fake.reply(request)
+                self.send_response(status)
+                for key, value in headers.items():
+                    self.send_header(key, value)
+                data = payload.encode()
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *args):
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_port}/mcp"
+
+
+@pytest.fixture
+def genie():
+    fake = FakeGenie()
+    yield fake
+    fake.server.shutdown()
+
+
+@pytest.fixture
+def cli(tmp_path):
+    """A stand-in `databricks` CLI: hands out FAKE_TOKENS in order, records each call; FAKE_CLI_FAIL makes it fail."""
+    calls = tmp_path / "cli-calls"
+    script = tmp_path / "databricks"
+    script.write_text(
+        "#!/bin/sh\n"
+        'echo "$@" >> "$FAKE_CLI_CALLS"\n'
+        'if [ -n "$FAKE_CLI_FAIL" ]; then echo "Error: refresh token is invalid" >&2; exit 1; fi\n'
+        'n=$(wc -l < "$FAKE_CLI_CALLS" | tr -d " ")\n'
+        'token=$(echo "$FAKE_TOKENS" | cut -d, -f"$n")\n'
+        'printf \'{"access_token":"%s","token_type":"Bearer","expires_in":3600}\' "$token"\n'
+    )
+    script.chmod(0o755)
+    return script, calls
+
+
+class Bridge:
+    def __init__(self, genie, cli, **env):
+        script, calls = cli
+        self.process = subprocess.Popen(
+            ["node", str(BRIDGE)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env={**os.environ, "GENIE_MCP_URL": genie.url, "DATABRICKS_CLI": str(script),
+                 "DATABRICKS_CONFIG_PROFILE": "DEMO", "FAKE_CLI_CALLS": str(calls), "FAKE_TOKENS": "tok-1,tok-2", **env},
+        )
+        self.lines = queue.Queue()
+        threading.Thread(target=lambda: [self.lines.put(line) for line in self.process.stdout], daemon=True).start()
+
+    def send(self, message):
+        self.process.stdin.write(json.dumps(message) + "\n")
+        self.process.stdin.flush()
+
+    def reply(self, timeout=10):
+        return json.loads(self.lines.get(timeout=timeout))
+
+    def close(self):
+        self.process.stdin.close()
+        self.process.wait(timeout=10)
+        return self.process.stderr.read()
+
+
+@pytest.fixture
+def start(genie, cli):
+    bridges = []
+
+    def _start(**env):
+        bridges.append(Bridge(genie, cli, **env))
+        return bridges[-1]
+
+    yield _start
+    for bridge in bridges:
+        if bridge.process.poll() is None:
+            bridge.process.kill()
+
+
+def cli_calls(cli):
+    _, calls = cli
+    return calls.read_text().splitlines() if calls.exists() else []
+
+
+def test_forwards_a_request_signed_with_the_cli_token_and_returns_the_reply(start, genie, cli):
+    bridge = start()
+    bridge.send(INITIALIZE)
+
+    assert bridge.reply() == {"jsonrpc": "2.0", "id": 1, "result": {"ok": True}}
+    assert genie.requests[0]["body"] == INITIALIZE
+    assert genie.requests[0]["headers"]["authorization"] == "Bearer tok-1"
+    assert cli_calls(cli) == ["auth token --profile DEMO --output json"]
+
+
+def test_sends_the_session_id_from_initialize_on_later_requests(start, genie):
+    genie.reply = lambda request: (200, {"Content-Type": "application/json", "Mcp-Session-Id": "session-7"},
+                                   json.dumps({"jsonrpc": "2.0", "id": request["body"].get("id"), "result": {}}))
+    bridge = start()
+    bridge.send(INITIALIZE)
+    bridge.reply()
+    bridge.send(TOOLS_LIST)
+    bridge.reply()
+
+    assert genie.requests[1]["headers"]["mcp-session-id"] == "session-7"
+
+
+def test_forwards_notifications_without_writing_a_reply(start, genie):
+    genie.reply = lambda request: ((202, {}, "") if "id" not in request["body"] else
+                                   (200, {"Content-Type": "application/json"},
+                                    json.dumps({"jsonrpc": "2.0", "id": request["body"]["id"], "result": {}})))
+    bridge = start()
+    bridge.send(INITIALIZED)
+    bridge.send(TOOLS_LIST)
+
+    assert bridge.reply()["id"] == 2
+    assert genie.requests[0]["body"] == INITIALIZED
+
+
+def test_unwraps_event_stream_replies(start, genie):
+    message = {"jsonrpc": "2.0", "id": 2, "result": {"tools": []}}
+    genie.reply = lambda request: (200, {"Content-Type": "text/event-stream"}, f"event: message\ndata: {json.dumps(message)}\n\n")
+    bridge = start()
+    bridge.send(TOOLS_LIST)
+
+    assert bridge.reply() == message
+
+
+def test_reuses_the_token_until_it_is_about_to_expire(start, cli):
+    bridge = start()
+    bridge.send(INITIALIZE)
+    bridge.reply()
+    bridge.send(TOOLS_LIST)
+    bridge.reply()
+
+    assert len(cli_calls(cli)) == 1
+
+
+def test_gets_a_new_token_and_retries_once_when_the_token_is_rejected(start, genie, cli):
+    def reply(request):
+        if request["headers"]["authorization"] == "Bearer tok-1":
+            return 401, {"Content-Type": "application/json"}, '{"error":"invalid token"}'
+        return 200, {"Content-Type": "application/json"}, json.dumps({"jsonrpc": "2.0", "id": 2, "result": {}})
+
+    genie.reply = reply
+    bridge = start()
+    bridge.send(TOOLS_LIST)
+
+    assert bridge.reply() == {"jsonrpc": "2.0", "id": 2, "result": {}}
+    assert [r["headers"]["authorization"] for r in genie.requests] == ["Bearer tok-1", "Bearer tok-2"]
+    assert len(cli_calls(cli)) == 2
+
+
+def test_a_failed_cli_sign_in_becomes_an_error_that_says_how_to_fix_it(start):
+    bridge = start(FAKE_CLI_FAIL="1")
+    bridge.send(TOOLS_LIST)
+    reply = bridge.reply()
+
+    assert reply["id"] == 2
+    assert "databricks auth login --profile DEMO" in reply["error"]["message"]
+
+
+def test_upstream_http_errors_become_json_rpc_errors(start, genie):
+    genie.reply = lambda request: (500, {"Content-Type": "text/plain"}, "boom")
+    bridge = start()
+    bridge.send(TOOLS_LIST)
+    reply = bridge.reply()
+
+    assert reply["id"] == 2
+    assert "HTTP 500" in reply["error"]["message"]
+
+
+def test_never_writes_the_token_to_its_output(start, genie):
+    genie.reply = lambda request: (500, {"Content-Type": "text/plain"}, "boom")
+    bridge = start()
+    bridge.send(TOOLS_LIST)
+    reply = bridge.reply()
+    stderr = bridge.close()
+
+    assert "tok-1" not in json.dumps(reply) + stderr
+
+
+def node_eval(expression):
+    script = f"import({json.dumps(BRIDGE.as_uri())}).then(m => console.log(JSON.stringify({expression})))"
+    return json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True).stdout)
+
+
+@pytest.mark.parametrize("host", ["workspace.example.test", "https://workspace.example.test", "https://workspace.example.test/"])
+def test_the_default_url_is_the_genie_one_mcp_on_the_configured_host(host):
+    assert node_eval(f"m.genieUrl({json.dumps(host)})") == \
+        "https://workspace.example.test/ai-gateway/mcp-services/system.ai.genie_one_mcp"
+
+
+def test_looks_for_the_cli_in_the_usual_install_folders_when_path_is_minimal():
+    candidates = node_eval('m.cliCandidates({PATH: "/usr/bin", HOME: "/home/me"})')
+
+    assert candidates[0] == "/usr/bin/databricks"
+    for folder in ("/opt/homebrew/bin", "/usr/local/bin", "/home/me/.local/bin"):
+        assert f"{folder}/databricks" in candidates
