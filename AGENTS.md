@@ -15,9 +15,9 @@ Work is tracked as issues on the [project board](https://github.com/users/datasc
 ## Status (2026-10-20)
 
 - Done: read the plugin guide (`Antigravity Plugin Marketplace Publishing Guide.pdf`, repo root, git-ignored) (#1); research on Antigravity (#2), Databricks (#3), and the ecosystem (#4); this file (#19); the director subagent (#20).
-- Decided: the first user and their first question (#5).
+- Decided: the first user and their first question (#5); sign-in (#8, with #14 folded in).
 - In progress: nothing yet; the POV (#6) is next.
-- Next, in order: POV (#6) → scope (#7, which also sorts ideas #13–#18 into v0, later, or drop) → sign-in (#8) → demo workspace (#10, the user decides) → design doc (#9) → build (#11) → demo (#12). Building starts after the design doc is approved.
+- Next, in order: POV (#6) → scope (#7, which also sorts ideas #13–#18 and #22 into v0, later, or drop) → demo workspace (#10, the user decides) → spike (#21) → design doc (#9) → build (#11) → demo (#12). Building starts after the design doc is approved.
 
 ## What we know
 
@@ -27,7 +27,7 @@ Work is tracked as issues on the [project board](https://github.com/users/datasc
 - The manifest sits at the root, or at `.antigravity-plugin/plugin.json` when the repo also ships `.claude-plugin/` or `.cursor-plugin/` manifests. Component paths always resolve from the plugin root.
 - `name` is kebab-case, must match the folder, and prefixes MCP server names (`<plugin>-<server>`). The 2.24.0 loader reads only `name`, `description`, `displayName`, `logo`, `suggestedPrompts` (up to 3), `version`, `disabled` and `skills`. `author` and `homepage` are silently dropped, despite what the guide says.
 - MCP servers are remote (`serverUrl` + `headers`) or local (`command`/`args`/`env`). Node/npx ship with the app.
-- `variables` (`name`, `title`, `description`, `link`) are asked for at install and stored as plain text in `~/.gemini/config/config.json`. The guide's `secret`/keychain option doesn't exist in 2.24.0.
+- `variables` (`name`, `title`, `description`, `link`) are asked for at install and stored as plain text in `~/.gemini/config/config.json`. The guide's `secret`/keychain option doesn't exist in 2.24.0. (This comes from the app's data definitions and stays unverified until the spike, #21.)
 - `oauth` is `{clientId, clientSecret}`, or automatic discovery with dynamic client registration when it's left out. There's no field for scopes.
 - The installed copy is read-only at `~/.gemini/config/plugins/<name>`. Use `${PLUGIN_ROOT}`, `${PLUGIN_DATA}` and `${VAR}`, never absolute paths.
 - Skill frontmatter: `name` (matches the folder, becomes `/name` in chat) and `description` (what it does and when to use it).
@@ -56,11 +56,12 @@ Work is tracked as issues on the [project board](https://github.com/users/datasc
 ## Decisions
 
 - First user (#5): a developer at a Databricks customer standardized on Google's AI tools. They're building in Antigravity against governed data that their data team already serves through a Genie space. Their first question is a business metric the agent would otherwise guess at, e.g. "Top 10 products by revenue last quarter vs. the prior quarter?", then "By region?", with Genie's SQL going into their code. Business users are out of scope. This is the director's call; the user can override it.
+- Sign-in (#8): a Node bridge inside the plugin gets a fresh token from `databricks auth token --profile` on each request and forwards calls to the Genie One MCP. Settings hold only the workspace host and CLI profile. The Genie skills ship alongside as know-how and a CLI fallback, and a rule says to prefer the MCP tools. Build the skills first, then the bridge; demo the bridge. No PATs in settings. Admin-registered OAuth is documented, not built.
 
 ## Open questions
 
-- How do users sign in (#8)? Automatic OAuth is out (no dynamic client registration), and a PAT would sit in plain text. That leaves a bridge that reuses the CLI login, or an admin-registered OAuth app.
 - Which workspace and Genie space do we demo on (#10)?
+- May we install `agy` and run the throwaway spike (#21)?
 
 ## Working rules
 
@@ -70,5 +71,6 @@ Work is tracked as issues on the [project board](https://github.com/users/datasc
 - Never choose a Databricks CLI profile yourself; ask the user. Never print tokens.
 - Don't change the user's Antigravity setup (`~/.gemini`, `~/.antigravity`) without asking.
 - Research notes are kept in `.omc/research/`, which is git-ignored. Internal-only Databricks material (from Glean or Slack) stays there. Keep it, and customer names, out of GitHub issues and committed files, because this GitHub account is personal, even though the repo is private.
+- POV drafts live in `.omc/pov/` (git-ignored). The final version goes into a Google Doc in the user's Databricks Drive after review. GitHub only gets material from public sources.
 - Base branches and PRs on `origin/main`. The main checkout's local `main` (7a072aa) is an unrelated empty commit.
 - Update this file when research lands or a decision is made.
