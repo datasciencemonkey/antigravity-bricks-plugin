@@ -4,7 +4,7 @@ Ask Databricks Genie about your governed data from Antigravity's agent, and turn
 
 ## What's inside
 
-- **A local Genie bridge** (`scripts/genie-bridge.mjs`). It connects Antigravity to the Genie One MCP server in your workspace and signs every request with a fresh token from your Databricks CLI login. No tokens are stored in Antigravity's settings.
+- **A local Genie bridge** (`scripts/genie_bridge.py`), a small Python script that uses only the standard library. It connects Antigravity to the Genie One MCP server in your workspace and signs every request with a fresh token from your Databricks CLI login. No tokens are stored in Antigravity's settings.
 - **The `genie` skill.** It teaches the agent how to ask Genie, wait for the answer, and use Genie's SQL.
 - **An always-on rule.** It sends data questions to Genie instead of guesswork.
 
@@ -13,6 +13,7 @@ Ask Databricks Genie about your governed data from Antigravity's agent, and turn
 - The Databricks CLI, signed in: `databricks auth login --host https://<workspace>.cloud.databricks.com` (this creates the `DEFAULT` profile)
 - Genie One available in your workspace (partner-powered AI features turned on)
 - CAN USE on a SQL warehouse, and access to the data you want to ask about
+- Python 3.9 or later as `python3`. It's already on developer machines; on a Mac, Apple's command line tools include it.
 
 ## Install
 
@@ -31,4 +32,5 @@ Restart the Antigravity app (the CLI picks it up on its next run). There's nothi
 ## Troubleshooting
 
 - **Sign-in errors:** run `databricks auth login --profile <name>` again.
+- **The Genie tools don't show up:** check that `python3 --version` works in a terminal, then restart Antigravity.
 - **The Databricks CLI isn't found:** the bridge looks on your PATH and in the usual install folders (`/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`).

@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "genie": {
-      "command": "node",
-      "args": ["${PLUGIN_ROOT}/scripts/genie-bridge.mjs"]
+      "command": "python3",
+      "args": ["${PLUGIN_ROOT}/scripts/genie_bridge.py"]
     }
   }
 }

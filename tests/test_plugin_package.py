@@ -52,9 +52,10 @@ def test_logo_is_a_bundled_svg():
 def test_the_only_mcp_server_is_the_local_genie_bridge():
     (bridge,) = mcp_config()["mcpServers"].values()
     server = bridge
-    assert server["command"] == "node"
-    assert server["args"] == ["${PLUGIN_ROOT}/scripts/genie-bridge.mjs"]
-    assert (PLUGIN / "scripts" / "genie-bridge.mjs").is_file()
+    # Python, not Node: Antigravity doesn't give plugin servers its bundled Node, and every developer Mac has python3.
+    assert server["command"] == "python3"
+    assert server["args"] == ["${PLUGIN_ROOT}/scripts/genie_bridge.py"]
+    assert (PLUGIN / "scripts" / "genie_bridge.py").is_file()
 
 
 def server():
@@ -98,7 +99,7 @@ def test_the_always_on_rule_steers_data_questions_to_genie():
 
 def test_readme_lists_the_prerequisites():
     readme = (PLUGIN / "README.md").read_text()
-    for prerequisite in ("databricks auth login", "agy plugin install", "CAN USE"):
+    for prerequisite in ("databricks auth login", "agy plugin install", "CAN USE", "Python 3.9"):
         assert prerequisite in readme
 
 

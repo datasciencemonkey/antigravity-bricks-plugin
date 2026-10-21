@@ -1,18 +1,21 @@
 """The Genie bridge: a local stdio MCP server that forwards to the Genie One MCP, signed with the Databricks CLI login.
 
-Runs the real bridge under Node against a stand-in `databricks` CLI and a stand-in Genie MCP server.
+Runs the real bridge under Python against a stand-in `databricks` CLI and a stand-in Genie MCP server.
 """
 import json
 import os
 import queue
 import subprocess
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 
-BRIDGE = Path(__file__).resolve().parent.parent / "plugins" / "databricks-genie" / "scripts" / "genie-bridge.mjs"
+BRIDGE = Path(__file__).resolve().parent.parent / "plugins" / "databricks-genie" / "scripts" / "genie_bridge.py"
+# Run the bridge under the oldest Python a developer is likely to have: Apple's /usr/bin/python3 is 3.9.
+PYTHON = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else "python3"
 INITIALIZE = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
               "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}}
 TOOLS_LIST = {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
@@ -69,7 +72,7 @@ def cli(tmp_path):
         'if [ "$2" = "describe" ]; then printf \'{"details":{"host":"%s","auth_type":"databricks-cli"}}\' "$FAKE_HOST"; exit 0; fi\n'
         'n=$(grep -c "auth token" "$FAKE_CLI_CALLS")\n'
         'token=$(echo "$FAKE_TOKENS" | cut -d, -f"$n")\n'
-        'printf \'{"access_token":"%s","token_type":"Bearer","expires_in":3600}\' "$token"\n'
+        'printf \'{"access_token":"%s","token_type":"Bearer","expires_in":%s}\' "$token" "${FAKE_EXPIRES_IN:-3600}"\n'
     )
     script.chmod(0o755)
     return script, calls
@@ -79,7 +82,7 @@ class Bridge:
     def __init__(self, genie, cli, **env):
         script, calls = cli
         self.process = subprocess.Popen(
-            ["node", str(BRIDGE)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            [PYTHON, str(BRIDGE)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             env={**os.environ, "GENIE_MCP_URL": genie.url, "DATABRICKS_CLI": str(script),
                  "DATABRICKS_CONFIG_PROFILE": "DEMO", "DATABRICKS_HOST": "", "FAKE_CLI_CALLS": str(calls), "FAKE_TOKENS": "tok-1,tok-2", **env},
         )
@@ -215,19 +218,21 @@ def test_never_writes_the_token_to_its_output(start, genie):
     assert "tok-1" not in json.dumps(reply) + stderr
 
 
-def node_eval(expression):
-    script = f"import({json.dumps(BRIDGE.as_uri())}).then(m => console.log(JSON.stringify({expression})))"
-    return json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True).stdout)
+def bridge_eval(expression):
+    """Evaluate `expression` with the bridge module loaded as `m`, under the same Python the bridge runs on."""
+    code = ("import importlib.util, json, sys; spec = importlib.util.spec_from_file_location('bridge', sys.argv[1]); "
+            "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); print(json.dumps(" + expression + "))")
+    return json.loads(subprocess.run([PYTHON, "-c", code, str(BRIDGE)], capture_output=True, text=True, check=True).stdout)
 
 
 @pytest.mark.parametrize("host", ["workspace.example.test", "https://workspace.example.test", "https://workspace.example.test/"])
 def test_the_default_url_is_the_genie_one_mcp_on_the_configured_host(host):
-    assert node_eval(f"m.genieUrl({json.dumps(host)})") == \
+    assert bridge_eval(f"m.genie_url({json.dumps(host)})") == \
         "https://workspace.example.test/ai-gateway/mcp-services/system.ai.genie_one_mcp"
 
 
 def test_looks_for_the_cli_in_the_usual_install_folders_when_path_is_minimal():
-    candidates = node_eval('m.cliCandidates({PATH: "/usr/bin", HOME: "/home/me"})')
+    candidates = bridge_eval('m.cli_candidates({"PATH": "/usr/bin", "HOME": "/home/me"})')
 
     assert candidates[0] == "/usr/bin/databricks"
     for folder in ("/opt/homebrew/bin", "/usr/local/bin", "/home/me/.local/bin"):
@@ -258,3 +263,15 @@ def test_a_failed_workspace_lookup_becomes_an_error_that_says_how_to_fix_it(star
 
     assert reply["id"] == 2
     assert "databricks auth login --profile DEMO" in reply["error"]["message"]
+
+
+def test_asks_the_cli_for_a_new_token_shortly_before_the_old_one_expires(start, cli):
+    # The CLI's tokens last an hour and the bridge renews a minute early, so a 61-second token is stale after a second.
+    bridge = start(FAKE_EXPIRES_IN="61")
+    bridge.send(TOOLS_LIST)
+    bridge.reply()
+    time.sleep(1.5)
+    bridge.send({**TOOLS_LIST, "id": 3})
+    bridge.reply()
+
+    assert cli_calls(cli) == ["auth token --profile DEMO --output json"] * 2
