@@ -58,10 +58,11 @@ Work is tracked as issues on the [project board](https://github.com/users/datasc
 - First user (#5): a developer at a Databricks customer standardized on Google's AI tools. They're building in Antigravity against governed data that their data team already serves through a Genie space. Their first question is a business metric the agent would otherwise guess at, e.g. "Top 10 products by revenue last quarter vs. the prior quarter?", then "By region?", with Genie's SQL going into their code. Business users are out of scope. This is the director's call; the user can override it.
 - Sign-in (#8): a Node bridge inside the plugin gets a fresh token from `databricks auth token --profile` on each request and forwards calls to the Genie One MCP. Settings hold only the workspace host and CLI profile. The Genie skills ship alongside as know-how and a CLI fallback, and a rule says to prefer the MCP tools. Build the skills first, then the bridge; demo the bridge. No PATs in settings. Admin-registered OAuth is documented, not built.
 
+- Demo setup (#10, decided by the user): the `DEFAULT` CLI profile (a serverless FEVM workspace), with a new Genie space to be created over its sample data. Installing `agy` and running the spike (#21) are approved.
+
 ## Open questions
 
-- Which workspace and Genie space do we demo on (#10)?
-- May we install `agy` and run the throwaway spike (#21)?
+- None right now. New ones go to the director first.
 
 ## Working rules
 
