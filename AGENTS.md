@@ -15,9 +15,9 @@ Work is tracked as issues on the [project board](https://github.com/users/datasc
 ## Status (2026-10-20)
 
 - Done: read the plugin guide (`Antigravity Plugin Marketplace Publishing Guide.pdf`, repo root, git-ignored) (#1); research on Antigravity (#2), Databricks (#3), and the ecosystem (#4); this file (#19); the director subagent (#20); tests and the push gate (#23); the Genie plugin at `plugins/databricks-genie/` (#11); the spike (#21); the demo setup (#10).
-- Working: Genie answers the first-user question inside Antigravity through the plugin (`agy -p`, #12).
+- Working: Genie answers through the plugin in the Antigravity CLI (`agy -p`) and in the desktop app (#12). The IDE app is untested.
 - Decided: the first user and their first question (#5); sign-in (#8, with #14 folded in).
-- In progress: the POV draft is waiting for the user's review (#6), and the desktop-app demo needs an app restart (#12).
+- In progress: the POV draft is waiting for the user's review (#6).
 - Next: scope (#7), then the hardening follow-ups (#24).
 
 ## What we know
