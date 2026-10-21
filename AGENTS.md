@@ -14,10 +14,9 @@ Work is tracked as issues on the [project board](https://github.com/users/datasc
 
 ## Status (2026-10-20)
 
-- Done: read the plugin guide (`Antigravity Plugin Marketplace Publishing Guide.pdf`, repo root, git-ignored) (#1); research on Antigravity (#2), Databricks (#3), and the ecosystem (#4); this file (#19); the director subagent (#20).
+- Done: read the plugin guide (`Antigravity Plugin Marketplace Publishing Guide.pdf`, repo root, git-ignored) (#1); research on Antigravity (#2), Databricks (#3), and the ecosystem (#4); this file (#19); the director subagent (#20); tests and the push gate (#23).
 - Decided: the first user and their first question (#5); sign-in (#8, with #14 folded in).
-- In progress: nothing yet; the POV (#6) is next.
-- Next, in order: POV (#6) → scope (#7, which also sorts ideas #13–#18 and #22 into v0, later, or drop) → demo workspace (#10, the user decides) → spike (#21) → design doc (#9) → build (#11) → demo (#12). Building starts after the design doc is approved.
+- Next: build the Genie plugin test-first (#11), install it in Antigravity, and demo it (#12). The spike (#21) folds into that. The POV (#6) is drafted in the background.
 
 ## What we know
 
@@ -69,6 +68,10 @@ Work is tracked as issues on the [project board](https://github.com/users/datasc
 - Questions and dispatch plans go to the `director` subagent first (`.claude/agents/director.md`). It keeps the work on one to-do at a time, investigates questions with its tools, and says when only the user can decide. Consult it before dispatching any other subagent.
 - Every to-do and idea is an issue on the board, assigned to `datasciencemonkey`; move it Todo → In Progress → Done as work happens, and never close one without that assignee. Local helper: `uv run python .omc/scripts/board.py move <issue> "<status>"`.
 - Use `uv` to run anything. Every commit is authored and committed as datasciencemonkey@gmail.com.
+- Build everything test-first: write a failing test, watch it fail, then write the code. `uv run --locked pytest` is the one test command. It also scans for internal-only references, secrets, real workspace hostnames and wrong commit identities.
+- Tests gate every push. Install the pre-push hook once per clone with `uv run python -m tools.install_hooks`. Run the suite before pushing; GitHub Actions runs it again on every push. When both are green, fast-forward `main` with `git push origin HEAD:main`. Never use GitHub's merge buttons, which make GitHub the committer.
+- Check PR and issue text before posting: `uv run python -m tools.repo_checks --stdin < text.md`.
+- Never relock dependencies through the internal package proxy (the hostname check will flag it). Relock somewhere public PyPI is reachable.
 - Never choose a Databricks CLI profile yourself; ask the user. Never print tokens.
 - Don't change the user's Antigravity setup (`~/.gemini`, `~/.antigravity`) without asking.
 - Research notes are kept in `.omc/research/`, which is git-ignored. Internal-only Databricks material (from Glean or Slack) stays there. Keep it, and customer names, out of GitHub issues and committed files, because this GitHub account is personal, even though the repo is private.

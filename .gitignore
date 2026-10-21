@@ -8,3 +8,6 @@
 
 # Reference material kept out of git
 Antigravity Plugin Marketplace Publishing Guide.pdf
+
+# Python bytecode (uv's .venv and pytest's cache ignore themselves)
+__pycache__/
