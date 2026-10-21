@@ -14,9 +14,11 @@ Work is tracked as issues on the [project board](https://github.com/users/datasc
 
 ## Status (2026-10-20)
 
-- Done: read the plugin guide (`Antigravity Plugin Marketplace Publishing Guide.pdf`, repo root, git-ignored) (#1); research on Antigravity (#2), Databricks (#3), and the ecosystem (#4); this file (#19); the director subagent (#20); tests and the push gate (#23).
+- Done: read the plugin guide (`Antigravity Plugin Marketplace Publishing Guide.pdf`, repo root, git-ignored) (#1); research on Antigravity (#2), Databricks (#3), and the ecosystem (#4); this file (#19); the director subagent (#20); tests and the push gate (#23); the Genie plugin at `plugins/databricks-genie/` (#11); the spike (#21); the demo setup (#10).
+- Working: Genie answers the first-user question inside Antigravity through the plugin (`agy -p`, #12).
 - Decided: the first user and their first question (#5); sign-in (#8, with #14 folded in).
-- Next: build the Genie plugin test-first (#11), install it in Antigravity, and demo it (#12). The spike (#21) folds into that. The POV (#6) is drafted in the background.
+- In progress: the POV draft is waiting for the user's review (#6), and the desktop-app demo needs an app restart (#12).
+- Next: scope (#7), then the hardening follow-ups (#24).
 
 ## What we know
 
@@ -26,7 +28,8 @@ Work is tracked as issues on the [project board](https://github.com/users/datasc
 - The manifest sits at the root, or at `.antigravity-plugin/plugin.json` when the repo also ships `.claude-plugin/` or `.cursor-plugin/` manifests. Component paths always resolve from the plugin root.
 - `name` is kebab-case, must match the folder, and prefixes MCP server names (`<plugin>-<server>`). The 2.24.0 loader reads only `name`, `description`, `displayName`, `logo`, `suggestedPrompts` (up to 3), `version`, `disabled` and `skills`. `author` and `homepage` are silently dropped, despite what the guide says.
 - MCP servers are remote (`serverUrl` + `headers`) or local (`command`/`args`/`env`). Node/npx ship with the app.
-- `variables` (`name`, `title`, `description`, `link`) are asked for at install and stored as plain text in `~/.gemini/config/config.json`. The guide's `secret`/keychain option doesn't exist in 2.24.0. (This comes from the app's data definitions and stays unverified until the spike, #21.)
+- `variables` (`name`, `title`, `description`, `link`) are asked for at install and stored as plain text in `~/.gemini/config/config.json`. The guide's `secret`/keychain option doesn't exist in 2.24.0. A server that declares `variables` stays off until the user fills them in through the app, so the Genie plugin declares none (#21).
+- Plugin MCP servers register as `<plugin>_<server>` (here `databricks-genie_genie`). Their tools load lazily and are called through `call_mcp_tool`. Headless `agy -p` runs need allow rules such as `mcp(databricks-genie_genie/genie_ask)` in `~/.gemini/antigravity-cli/settings.json`.
 - `oauth` is `{clientId, clientSecret}`, or automatic discovery with dynamic client registration when it's left out. There's no field for scopes.
 - The installed copy is read-only at `~/.gemini/config/plugins/<name>`. Use `${PLUGIN_ROOT}`, `${PLUGIN_DATA}` and `${VAR}`, never absolute paths.
 - Skill frontmatter: `name` (matches the folder, becomes `/name` in chat) and `description` (what it does and when to use it).
@@ -55,7 +58,7 @@ Work is tracked as issues on the [project board](https://github.com/users/datasc
 ## Decisions
 
 - First user (#5): a developer at a Databricks customer standardized on Google's AI tools. They're building in Antigravity against governed data that their data team already serves through a Genie space. Their first question is a business metric the agent would otherwise guess at, e.g. "Top 10 products by revenue last quarter vs. the prior quarter?", then "By region?", with Genie's SQL going into their code. Business users are out of scope. This is the director's call; the user can override it.
-- Sign-in (#8): a Node bridge inside the plugin gets a fresh token from `databricks auth token --profile` on each request and forwards calls to the Genie One MCP. Settings hold only the workspace host and CLI profile. The Genie skills ship alongside as know-how and a CLI fallback, and a rule says to prefer the MCP tools. Build the skills first, then the bridge; demo the bridge. No PATs in settings. Admin-registered OAuth is documented, not built.
+- Sign-in (#8): a Node bridge inside the plugin gets a fresh token from `databricks auth token --profile` on each request and forwards calls to the Genie One MCP. The plugin has no settings: the bridge reads the workspace from `databricks auth describe`, using the `DEFAULT` profile or `DATABRICKS_CONFIG_PROFILE`. The Genie skills ship alongside as know-how and a CLI fallback, and a rule says to prefer the MCP tools. Build the skills first, then the bridge; demo the bridge. No PATs in settings. Admin-registered OAuth is documented, not built.
 
 - Demo setup (#10, decided by the user): the `DEFAULT` CLI profile (a serverless FEVM workspace), with a new Genie space to be created over its sample data. Installing `agy` and running the spike (#21) are approved.
 
