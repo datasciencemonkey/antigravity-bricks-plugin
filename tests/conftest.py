@@ -5,6 +5,11 @@ import pytest
 
 GOOD_EMAIL = "datasciencemonkey@gmail.com"
 
+# Git exports GIT_DIR and friends to hooks, aliases and `rebase --exec`. Inherited here, they would aim every temporary
+# repo's git commands at the real repository, so clear them before any test runs.
+for _name in subprocess.run(["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True).stdout.split():
+    os.environ.pop(_name, None)
+
 # Git run by the tests ignores the machine's global and system config (hooks path, signing, templates), so the
 # tests behave the same everywhere and never trigger managed hooks.
 ISOLATED_GIT = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull, "GIT_TERMINAL_PROMPT": "0"}

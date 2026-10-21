@@ -15,4 +15,5 @@ jobs:
         with:
           fetch-depth: 0 # the commit-range check needs origin/main
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - run: curl -fsSL https://antigravity.google/cli/install.sh | bash && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: uv run --locked pytest

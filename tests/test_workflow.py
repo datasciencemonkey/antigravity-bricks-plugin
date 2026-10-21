@@ -39,7 +39,11 @@ def test_checkout_fetches_the_full_history_so_origin_main_exists_for_the_commit_
     assert step_using(load_workflow(), "actions/checkout")["with"]["fetch-depth"] == 0
 
 
-def test_sets_up_uv_after_checkout_and_then_runs_pytest_against_the_locked_dependencies():
+# The plugin tests run Antigravity's own validator, so CI installs the Antigravity CLI the documented way.
+INSTALL_AGY = 'curl -fsSL https://antigravity.google/cli/install.sh | bash && echo "$HOME/.local/bin" >> "$GITHUB_PATH"'
+
+
+def test_sets_up_uv_and_the_antigravity_cli_then_runs_pytest_against_the_locked_dependencies():
     sequence = [step.get("uses", "").split("@")[0] or step.get("run") for step in steps(load_workflow())]
 
-    assert sequence == ["actions/checkout", "astral-sh/setup-uv", "uv run --locked pytest"]
+    assert sequence == ["actions/checkout", "astral-sh/setup-uv", INSTALL_AGY, "uv run --locked pytest"]

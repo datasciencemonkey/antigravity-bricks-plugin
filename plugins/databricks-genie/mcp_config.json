@@ -1,0 +1,26 @@
+{
+  "mcpServers": {
+    "mcp": {
+      "command": "node",
+      "args": ["${PLUGIN_ROOT}/scripts/genie-bridge.mjs"],
+      "env": {
+        "DATABRICKS_HOST": "${DATABRICKS_HOST}",
+        "DATABRICKS_CONFIG_PROFILE": "${DATABRICKS_PROFILE}"
+      },
+      "variables": [
+        {
+          "name": "DATABRICKS_HOST",
+          "title": "Databricks workspace URL",
+          "description": "Your workspace URL, for example https://<workspace>.cloud.databricks.com",
+          "link": "https://docs.databricks.com/aws/en/workspace/workspace-details"
+        },
+        {
+          "name": "DATABRICKS_PROFILE",
+          "title": "Databricks CLI profile",
+          "description": "The CLI profile you signed in with (databricks auth login --profile <name>). Use DEFAULT if you didn't name one.",
+          "link": "https://docs.databricks.com/aws/en/dev-tools/cli/authentication"
+        }
+      ]
+    }
+  }
+}
