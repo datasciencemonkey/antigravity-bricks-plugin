@@ -10,7 +10,7 @@ Ask Databricks Genie about your governed data from Antigravity's agent, and turn
 
 ## Before you install
 
-- The Databricks CLI, signed in: `databricks auth login --host https://<workspace>.cloud.databricks.com --profile <name>`
+- The Databricks CLI, signed in: `databricks auth login --host https://<workspace>.cloud.databricks.com` (this creates the `DEFAULT` profile)
 - Genie One available in your workspace (partner-powered AI features turned on)
 - CAN USE on a SQL warehouse, and access to the data you want to ask about
 
@@ -20,7 +20,7 @@ Ask Databricks Genie about your governed data from Antigravity's agent, and turn
 agy plugin install <path-or-git-url-of-this-folder>
 ```
 
-Restart Antigravity, then enter your workspace URL and CLI profile name when asked.
+Restart the Antigravity app (the CLI picks it up on its next run). There's nothing to configure: the plugin uses your `DEFAULT` Databricks CLI profile. To use another profile, set `DATABRICKS_CONFIG_PROFILE` in the environment Antigravity starts from.
 
 ## Try it
 

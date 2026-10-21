@@ -26,34 +26,41 @@ export function cliCandidates(env) {
 
 class BridgeError extends Error {}
 
-function tokenSource(env) {
+// Everything the bridge needs from Databricks comes from one CLI profile: the workspace and fresh tokens.
+function databricksCli(env) {
   const profile = env.DATABRICKS_CONFIG_PROFILE || "DEFAULT";
   const loginHint = `Run: databricks auth login --profile ${profile}`;
   // Let the profile decide the workspace and credentials, not variables inherited from the agent.
   const { DATABRICKS_HOST, DATABRICKS_TOKEN, ...cliEnv } = env;
   let cached = null;
 
-  const fetchToken = () =>
+  const run = (args, failure) =>
     new Promise((resolve, reject) => {
       const cli = env.DATABRICKS_CLI || cliCandidates(env).find((path) => existsSync(path));
       if (!cli) return reject(new BridgeError(`The Databricks CLI wasn't found. Install it, then run: databricks auth login --profile ${profile}`));
-      execFile(cli, ["auth", "token", "--profile", profile, "--output", "json"], { env: cliEnv, timeout: 30_000 }, (error, stdout) => {
-        if (error) return reject(new BridgeError(`Couldn't get a Databricks token from the CLI. ${loginHint}`));
+      execFile(cli, [...args, "--profile", profile, "--output", "json"], { env: cliEnv, timeout: 30_000 }, (error, stdout) => {
+        if (error) return reject(new BridgeError(`${failure} ${loginHint}`));
         try {
-          const { access_token: token, expires_in: expiresIn, expiry } = JSON.parse(stdout);
-          const lifetime = expiresIn ? expiresIn * 1000 : Date.parse(expiry) - Date.now();
-          const refreshAt = Date.now() + (Number.isFinite(lifetime) ? lifetime - REFRESH_MARGIN_MS : 5 * 60_000);
-          resolve({ token, refreshAt });
+          resolve(JSON.parse(stdout));
         } catch {
-          reject(new BridgeError(`The Databricks CLI returned an unexpected token response. ${loginHint}`));
+          reject(new BridgeError(`The Databricks CLI returned an unexpected response. ${loginHint}`));
         }
       });
     });
 
   return {
     loginHint,
+    async workspaceUrl() {
+      const { details } = await run(["auth", "describe"], `Couldn't find the Databricks workspace for CLI profile ${profile}.`);
+      if (!details?.host) throw new BridgeError(`CLI profile ${profile} has no workspace URL. ${loginHint}`);
+      return genieUrl(details.host);
+    },
     async get() {
-      if (!cached || Date.now() >= cached.refreshAt) cached = await fetchToken();
+      if (!cached || Date.now() >= cached.refreshAt) {
+        const { access_token: token, expires_in: expiresIn, expiry } = await run(["auth", "token"], "Couldn't get a Databricks token from the CLI.");
+        const lifetime = expiresIn ? expiresIn * 1000 : Date.parse(expiry) - Date.now();
+        cached = { token, refreshAt: Date.now() + (Number.isFinite(lifetime) ? lifetime - REFRESH_MARGIN_MS : 5 * 60_000) };
+      }
       return cached.token;
     },
     invalidate() {
@@ -112,7 +119,7 @@ async function handle(line, context) {
     return write({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } });
   }
   try {
-    if (!context.url) throw new BridgeError("Set the Databricks workspace URL in the plugin's settings.");
+    context.url ||= await context.tokens.workspaceUrl();
     for (const reply of await forward(message, context)) write(reply);
   } catch (error) {
     const text = error instanceof BridgeError ? error.message : `Genie bridge error: ${error.message}`;
@@ -125,7 +132,7 @@ function main() {
   const env = process.env;
   const context = {
     url: env.GENIE_MCP_URL || (env.DATABRICKS_HOST ? genieUrl(env.DATABRICKS_HOST) : null),
-    tokens: tokenSource(env),
+    tokens: databricksCli(env),
     session: {},
   };
   // Handle messages one at a time so replies and the session id stay in order.

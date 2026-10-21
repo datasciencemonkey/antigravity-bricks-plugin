@@ -50,7 +50,8 @@ def test_logo_is_a_bundled_svg():
 
 
 def test_the_only_mcp_server_is_the_local_genie_bridge():
-    (server,) = mcp_config()["mcpServers"].values()
+    (bridge,) = mcp_config()["mcpServers"].values()
+    server = bridge
     assert server["command"] == "node"
     assert server["args"] == ["${PLUGIN_ROOT}/scripts/genie-bridge.mjs"]
     assert (PLUGIN / "scripts" / "genie-bridge.mjs").is_file()
@@ -61,24 +62,17 @@ def server():
     return only
 
 
-def test_settings_live_on_the_server_entry_not_at_the_top_level():
-    # 2.24.0 reads `variables` per server (McpServerSpec.variables); a top-level `variables` is ignored.
+def test_the_server_is_named_genie_so_it_shows_up_as_databricks_genie_genie():
+    assert list(mcp_config()["mcpServers"]) == ["genie"]
+
+
+def test_the_server_needs_no_settings_so_it_starts_right_after_install():
+    # A server that declares `variables` stays off until the user fills them in, and Antigravity stores them as
+    # plain text. The bridge reads the workspace and sign-in from the Databricks CLI profile instead.
     assert set(mcp_config()) == {"mcpServers"}
-
-
-def test_every_setting_the_server_uses_is_declared_and_described():
-    settings_free = {key: value for key, value in server().items() if key != "variables"}
-    used = set(re.findall(r"\$\{([A-Z0-9_]+)\}", json.dumps(settings_free))) - PLACEHOLDERS
-    declared = {v["name"]: v for v in server()["variables"]}
-    assert used == set(declared)
-    for variable in declared.values():
-        assert set(variable) == {"name", "title", "description", "link"}
-
-
-def test_no_setting_holds_a_secret():
-    # Antigravity stores settings as plain text, so sign-in has to come from the Databricks CLI login instead.
-    names = [v["name"] for v in server()["variables"]]
-    assert not [n for n in names if re.search(r"TOKEN|SECRET|PASSWORD|PAT\b", n)]
+    assert "variables" not in server() and "headers" not in server()
+    used = set(re.findall(r"\$\{([A-Z0-9_]+)\}", json.dumps(server()))) - PLACEHOLDERS
+    assert used == set()
 
 
 def test_plugin_never_uses_the_retired_genie_endpoint():
@@ -117,3 +111,10 @@ def test_antigravitys_own_strict_validator_finds_nothing_wrong():
     assert [f for f in report["findings"] if f["severity"] != "note"] == []
     assert result.returncode == 0
     assert report["components"]["mcpServers"] == 1 and report["components"]["skills"] >= 1
+
+
+def test_the_skill_names_the_server_antigravity_registers_so_the_agent_can_call_genie_directly():
+    # Antigravity registers plugin servers as <plugin>_<server> and exposes their tools through call_mcp_tool.
+    skill = (PLUGIN / "skills" / "genie" / "SKILL.md").read_text()
+    assert "call_mcp_tool" in skill
+    assert f"{manifest()['name']}_{next(iter(mcp_config()['mcpServers']))}" in skill

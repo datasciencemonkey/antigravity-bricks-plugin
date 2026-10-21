@@ -66,7 +66,8 @@ def cli(tmp_path):
         "#!/bin/sh\n"
         'echo "$@" >> "$FAKE_CLI_CALLS"\n'
         'if [ -n "$FAKE_CLI_FAIL" ]; then echo "Error: refresh token is invalid" >&2; exit 1; fi\n'
-        'n=$(wc -l < "$FAKE_CLI_CALLS" | tr -d " ")\n'
+        'if [ "$2" = "describe" ]; then printf \'{"details":{"host":"%s","auth_type":"databricks-cli"}}\' "$FAKE_HOST"; exit 0; fi\n'
+        'n=$(grep -c "auth token" "$FAKE_CLI_CALLS")\n'
         'token=$(echo "$FAKE_TOKENS" | cut -d, -f"$n")\n'
         'printf \'{"access_token":"%s","token_type":"Bearer","expires_in":3600}\' "$token"\n'
     )
@@ -80,7 +81,7 @@ class Bridge:
         self.process = subprocess.Popen(
             ["node", str(BRIDGE)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             env={**os.environ, "GENIE_MCP_URL": genie.url, "DATABRICKS_CLI": str(script),
-                 "DATABRICKS_CONFIG_PROFILE": "DEMO", "FAKE_CLI_CALLS": str(calls), "FAKE_TOKENS": "tok-1,tok-2", **env},
+                 "DATABRICKS_CONFIG_PROFILE": "DEMO", "DATABRICKS_HOST": "", "FAKE_CLI_CALLS": str(calls), "FAKE_TOKENS": "tok-1,tok-2", **env},
         )
         self.lines = queue.Queue()
         threading.Thread(target=lambda: [self.lines.put(line) for line in self.process.stdout], daemon=True).start()
@@ -231,3 +232,29 @@ def test_looks_for_the_cli_in_the_usual_install_folders_when_path_is_minimal():
     assert candidates[0] == "/usr/bin/databricks"
     for folder in ("/opt/homebrew/bin", "/usr/local/bin", "/home/me/.local/bin"):
         assert f"{folder}/databricks" in candidates
+
+
+def test_reads_the_workspace_from_the_cli_profile_when_no_host_is_given(start, genie, cli):
+    bridge = start(GENIE_MCP_URL="", FAKE_HOST=genie.url.rsplit("/", 1)[0])
+    bridge.send(TOOLS_LIST)
+    bridge.reply()
+
+    assert genie.requests[0]["path"] == "/ai-gateway/mcp-services/system.ai.genie_one_mcp"
+    assert "auth describe --profile DEMO --output json" in cli_calls(cli)
+
+
+def test_uses_the_default_cli_profile_unless_one_is_set(start, cli):
+    bridge = start(DATABRICKS_CONFIG_PROFILE="")
+    bridge.send(TOOLS_LIST)
+    bridge.reply()
+
+    assert cli_calls(cli) == ["auth token --profile DEFAULT --output json"]
+
+
+def test_a_failed_workspace_lookup_becomes_an_error_that_says_how_to_fix_it(start):
+    bridge = start(GENIE_MCP_URL="", FAKE_CLI_FAIL="1")
+    bridge.send(TOOLS_LIST)
+    reply = bridge.reply()
+
+    assert reply["id"] == 2
+    assert "databricks auth login --profile DEMO" in reply["error"]["message"]

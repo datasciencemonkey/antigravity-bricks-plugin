@@ -9,6 +9,8 @@ Genie answers questions about the user's Databricks data. It finds the right tab
 
 ## With the Genie tools (preferred)
 
+In Antigravity these tools are on the MCP server `databricks-genie_genie`. Call them with `call_mcp_tool`, passing that server name, the tool name, and the arguments below. Their arguments are all listed here, so there's no need to look up their schemas first.
+
 1. Call `genie_ask` with the user's question in plain language. For a follow-up, pass the `conversation_id` from the previous answer so Genie keeps the context.
 2. `genie_ask` returns a `conversation_id` and a `response_id` with status `in_progress`. Call `genie_poll_response` with both. While it says it's still running, call it again without narrating each poll. Answers usually take 5–30 seconds.
 3. The finished answer is Markdown: Genie's reasoning, the SQL it ran, result tables, and an "Explore in Databricks" link. Show the user the key numbers, the SQL, and that link.
