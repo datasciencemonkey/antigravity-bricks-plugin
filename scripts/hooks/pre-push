@@ -1,5 +1,8 @@
 #!/bin/sh
 # Pre-push gate (issue #23): run the test suite before anything is pushed. A non-zero exit aborts the push.
 # Installed into $(git rev-parse --git-common-dir)/hooks/pre-push by: uv run python -m tools.install_hooks
-cd "$(git rev-parse --show-toplevel)" || exit 1
+top="$(git rev-parse --show-toplevel)" || exit 1
+# Git hands hooks repo-local variables such as GIT_DIR; clear them so tests that make their own repos aren't pointed at this one.
+unset $(git rev-parse --local-env-vars)
+cd "$top" || exit 1
 uv run --locked pytest </dev/null
