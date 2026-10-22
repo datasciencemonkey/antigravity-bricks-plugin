@@ -1,6 +1,6 @@
 # Progress: the Databricks Genie plugin for Google Antigravity
 
-As of 2026-10-21. Finished items are crossed out; issue numbers refer to the [project board](https://github.com/users/datasciencemonkey/projects/4).
+As of 2026-10-22. Finished items are crossed out; issue numbers refer to the [project board](https://github.com/users/datasciencemonkey/projects/4).
 
 ## Features and to-dos
 
@@ -12,10 +12,11 @@ As of 2026-10-21. Finished items are crossed out; issue numbers refer to the [pr
 - ~~No settings to fill in: the workspace comes from the CLI profile, `DEFAULT` unless `DATABRICKS_CONFIG_PROFILE` says otherwise (#21). The user chose to keep this as the design on 2026-10-21.~~
 - README: explain how to point the desktop app at another profile (`launchctl setenv DATABRICKS_CONFIG_PROFILE <name>`, then restart the app)
 - ~~Finds the Databricks CLI even when Antigravity starts the bridge with a bare PATH (#21)~~
-- ~~A `genie` skill: ask, wait for the answer, fetch full results, follow up in the same conversation, put Genie's SQL into code, and fall back to the CLI (#11)~~
+- ~~An `antigravity-databricks-genie` skill (renamed from `genie` on 2026-10-22, #26): ask, wait for the answer, fetch full results, follow up in the same conversation, put Genie's SQL into code, and fall back to the CLI (#11)~~
+- ~~The bridge waits up to 300 s for Genie (it was 120 s, and a slow poll timed out), and the skill says to poll again with the same IDs (#26)~~
 - ~~An always-on rule that sends data questions to Genie instead of guesswork (#11)~~
 - ~~README and logo (#11)~~
-- Bundle Databricks' published skills (`databricks-core`, `databricks-data-discovery`, `databricks-genie-agents`): a scope decision (#7)
+- ~~Decide whether to bundle Databricks' published skills (`databricks-core`, `databricks-data-discovery`, `databricks-genie-agents`)~~: decided 2026-10-22, they aren't bundled; the plugin is a standalone Genie connector that doesn't assume other skills are installed (#25)
 - Offer the per-space Genie Agent MCP alongside Genie One: a scope decision (#7)
 - A read-only "Genie analyst" subagent (#16)
 - Rules and hooks for safe data access (#17)
@@ -25,7 +26,7 @@ As of 2026-10-21. Finished items are crossed out; issue numbers refer to the [pr
 
 - ~~Genie One accepts a CLI-minted token (direct probe: initialize, list tools, ask, poll) (#21)~~
 - ~~Works in the Antigravity CLI: the first-user question answered end to end in about two minutes, with Genie's SQL and links back to Databricks (#12)~~
-- ~~Works in the Antigravity desktop app: the plugin's suggested prompt, confirmed by the user (#12)~~
+- ~~Works in the Antigravity desktop app: the plugin's suggested prompt, confirmed by the user, and re-verified with the Python bridge on 2026-10-22 (#12)~~
 - Try it in the Antigravity IDE app (untested)
 - Lock two or three demo questions, and capture screenshots that are safe to share
 
@@ -42,7 +43,7 @@ As of 2026-10-21. Finished items are crossed out; issue numbers refer to the [pr
 ### Engineering setup
 
 - ~~Project board, labeled issues, AGENTS.md, and the director subagent (#19, #20)~~
-- ~~195 tests, written test-first, including the 59-minute token renewal, including repo safety checks and Antigravity's own strict validator (#23)~~
+- ~~202 tests, written test-first, including the 59-minute token renewal, including repo safety checks and Antigravity's own strict validator (#23)~~
 - ~~Pre-push gate, GitHub Actions on every push, and fast-forward merges to `main` with every commit authored and committed as the user (#23)~~
 - ~~Restored this machine's Databricks git hooks (secret scanning on commit and push) (#23)~~
 - Hardening follow-ups from the code review (#24)
@@ -61,10 +62,11 @@ As of 2026-10-21. Finished items are crossed out; issue numbers refer to the [pr
 6. **Node to Python.** Turning Node off in `PATH` showed that Antigravity doesn't provide it to plugin servers. The bridge was rewritten in Python (standard library only) against the same tests, run under Apple's Python 3.9, and the demo passed again with no Node installed.
 7. **The demo.** In the CLI, a headless `agy -p` run needs allow rules for the four Genie tools. In the desktop app, it worked after a restart.
 8. **Every change** went the same way: tests, then a commit authored and committed as the user, then the pre-push gate running the suite, then GitHub Actions, then a fast-forward of `main`.
+9. **Standalone, and the rename (2026-10-22).** Databricks' agent-skills repo ships no MCP servers. Its Claude bundle installs in Antigravity from its GitHub subfolder URL, but Antigravity 2.24 doesn't read the folder the Databricks CLI installs skills into. So the user chose to keep this plugin a standalone Genie connector, renamed the skill, and raised the bridge's timeout.
 
 ### How a question flows
 
-1. The Antigravity agent reads the `genie` skill.
+1. The Antigravity agent reads the `antigravity-databricks-genie` skill.
 2. It calls `call_mcp_tool` on `databricks-genie_genie`, the local bridge.
 3. The bridge gets a token from `databricks auth token`, for the `DEFAULT` profile unless one is set.
 4. The bridge posts the call to the Genie One MCP in the workspace.
@@ -73,7 +75,7 @@ As of 2026-10-21. Finished items are crossed out; issue numbers refer to the [pr
 
 ### What changed on this machine
 
-- The Antigravity CLI (`agy`) in `~/.local/bin`, plus a PATH line its installer added to `~/.profile`
+- The Antigravity CLI (`agy`) in `~/.local/bin`, plus the PATH lines its installer added to `~/.profile`, `~/.zprofile` and `~/.zshrc`
 - The plugin, installed at `~/.gemini/config/plugins/databricks-genie`
 - `~/.gemini/antigravity-cli/settings.json`, which pre-approves the four Genie tools for headless runs
 - A backup of Antigravity's `config.json`

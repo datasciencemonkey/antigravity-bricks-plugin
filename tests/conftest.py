@@ -51,7 +51,10 @@ def repo(tmp_path):
     """A temporary git repo with one clean commit (README and a complete .gitignore), and origin/main pointing at it."""
     temp = TempRepo(tmp_path / "repo")
     temp.write("README.md", "# temp repo\n")
-    temp.write(".gitignore", ".omc/\n.isaac/\n.build/\nAntigravity Plugin Marketplace Publishing Guide.pdf\n")
+    temp.write(
+        ".gitignore",
+        ".omc/\n.isaac/\n.build/\nAntigravity Plugin Marketplace Publishing Guide.pdf\n.github/hooks/superset-notify.json\n",
+    )
     temp.commit("Base commit")
     temp.git("update-ref", "refs/remotes/origin/main", "HEAD")
     return temp

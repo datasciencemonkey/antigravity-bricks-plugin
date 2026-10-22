@@ -17,7 +17,7 @@ def test_reports_findings_from_files(repo):
 
 
 def test_reports_required_gitignore_entries_that_are_missing(repo):
-    repo.write(".gitignore", ".omc/\n.isaac/\n.build/\n")
+    repo.write(".gitignore", ".omc/\n.isaac/\n.build/\n.github/hooks/superset-notify.json\n")
 
     findings = repo_checks.scan_repo(repo.path)
 
@@ -30,7 +30,7 @@ def test_treats_a_missing_gitignore_file_as_missing_every_entry(repo):
 
     findings = repo_checks.scan_repo(repo.path)
 
-    assert [finding.check for finding in findings] == ["gitignore"] * 4
+    assert [finding.check for finding in findings] == ["gitignore"] * 5
 
 
 def test_reports_commits_with_a_wrong_identity(repo):

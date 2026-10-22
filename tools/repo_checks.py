@@ -96,7 +96,13 @@ def find_workspace_hostnames(text, path="<text>"):
     return _scan(text, path, "hostname", HOSTNAMES, allowed_matches=ALLOWED_HOSTS)
 
 
-REQUIRED_GITIGNORE_ENTRIES = [".omc/", ".isaac/", ".build/", "Antigravity Plugin Marketplace Publishing Guide.pdf"]
+REQUIRED_GITIGNORE_ENTRIES = [
+    ".omc/",
+    ".isaac/",
+    ".build/",
+    "Antigravity Plugin Marketplace Publishing Guide.pdf",
+    ".github/hooks/superset-notify.json",  # the Superset app writes this into every worktree
+]
 
 
 def find_missing_gitignore_entries(gitignore_text):

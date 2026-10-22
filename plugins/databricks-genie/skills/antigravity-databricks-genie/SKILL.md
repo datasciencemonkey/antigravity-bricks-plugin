@@ -1,5 +1,5 @@
 ---
-name: genie
+name: antigravity-databricks-genie
 description: Ask Databricks Genie questions about business data in a Databricks workspace (revenue, customers, products, which table holds what) and use its answers and SQL in code. Use when the user asks a data question, needs SQL against Databricks tables, or wants numbers from governed data instead of guesses.
 ---
 
@@ -12,7 +12,7 @@ Genie answers questions about the user's Databricks data. It finds the right tab
 In Antigravity these tools are on the MCP server `databricks-genie_genie`. Call them with `call_mcp_tool`, passing that server name, the tool name, and the arguments below. Their arguments are all listed here, so there's no need to look up their schemas first.
 
 1. Call `genie_ask` with the user's question in plain language. For a follow-up, pass the `conversation_id` from the previous answer so Genie keeps the context.
-2. `genie_ask` returns a `conversation_id` and a `response_id` with status `in_progress`. Call `genie_poll_response` with both. While it says it's still running, call it again without narrating each poll. Answers usually take 5–30 seconds.
+2. `genie_ask` returns a `conversation_id` and a `response_id` with status `in_progress`. Call `genie_poll_response` with both. While it says it's still running, call it again without narrating each poll. Answers usually take 5–30 seconds. If a poll call times out, poll again with the same `conversation_id` and `response_id` instead of asking the question again.
 3. The finished answer is Markdown: Genie's reasoning, the SQL it ran, result tables, and an "Explore in Databricks" link. Show the user the key numbers, the SQL, and that link.
 4. Result tables in the answer are previews. For complete rows, call `genie_get_query_result` with the `conversation_id`, the `response_id`, and the query's `item_id`.
 5. To stop a slow question, call `genie_cancel_response`.

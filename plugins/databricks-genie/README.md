@@ -5,7 +5,7 @@ Ask Databricks Genie about your governed data from Antigravity's agent, and turn
 ## What's inside
 
 - **A local Genie bridge** (`scripts/genie_bridge.py`), a small Python script that uses only the standard library. It connects Antigravity to the Genie One MCP server in your workspace and signs every request with a fresh token from your Databricks CLI login. No tokens are stored in Antigravity's settings.
-- **The `genie` skill.** It teaches the agent how to ask Genie, wait for the answer, and use Genie's SQL.
+- **The `antigravity-databricks-genie` skill.** It teaches the agent how to ask Genie, wait for the answer, and use Genie's SQL.
 - **An always-on rule.** It sends data questions to Genie instead of guesswork.
 
 ## Before you install

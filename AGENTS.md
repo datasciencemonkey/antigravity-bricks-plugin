@@ -12,12 +12,12 @@ Deliverables, in order:
 
 Work is tracked as issues on the [project board](https://github.com/users/datasciencemonkey/projects/4).
 
-## Status (2026-10-20)
+## Status (2026-10-22)
 
-- Done: read the plugin guide (`Antigravity Plugin Marketplace Publishing Guide.pdf`, repo root, git-ignored) (#1); research on Antigravity (#2), Databricks (#3), and the ecosystem (#4); this file (#19); the director subagent (#20); tests and the push gate (#23); the Genie plugin at `plugins/databricks-genie/` (#11); the spike (#21); the demo setup (#10).
-- Working: Genie answers through the plugin in the Antigravity CLI (`agy -p`) and in the desktop app (#12). The IDE app is untested.
+- Done: read the plugin guide (`Antigravity Plugin Marketplace Publishing Guide.pdf`, repo root, git-ignored) (#1); research on Antigravity (#2), Databricks (#3), and the ecosystem (#4); this file (#19); the director subagent (#20); tests and the push gate (#23); the Genie plugin at `plugins/databricks-genie/` (#11); the spike (#21); the demo setup (#10); the upstream check against `databricks/databricks-agent-skills` (#25).
+- Working: Genie answers through the plugin in the Antigravity CLI (`agy -p`) and in the desktop app (#12), which was re-verified with the Python bridge on 2026-10-22. The IDE app is untested.
 - Decided: the first user and their first question (#5); sign-in (#8, with #14 folded in).
-- In progress: the POV draft is waiting for the user's review (#6).
+- In progress: the POV draft is waiting for the user's review (#6); the standalone-connector batch (#26).
 - Next: scope (#7), then the hardening follow-ups (#24).
 
 ## What we know
@@ -41,26 +41,27 @@ Work is tracked as issues on the [project board](https://github.com/users/datasc
 **From research (#2, #3, #4)**
 
 - Databricks isn't in Antigravity's MCP Store or Marketplace. Discover is curated by Google and fed by `marketplace.json` catalogs; there's no submission process. Plugins ship today as GitHub repos installed with `agy plugin install <url>`.
-- Global skills now live in `~/.gemini/config/skills/`. The Databricks CLI still writes to `~/.gemini/antigravity/global_skills`, which 2.x no longer reads, so skills it installs are likely invisible. Bundling the skills in the plugin avoids this.
+- Global skills now live in `~/.gemini/config/skills/`. The Databricks CLI still writes to `~/.gemini/antigravity/global_skills`, which Antigravity 2.24 doesn't read (confirmed in #25), so skills it installs don't show up. Our plugin ships its own skill and doesn't depend on those.
 - The app's UI includes MCP Apps support, so Genie One's interactive view may render (untested). `agy -p "<prompt>" --output-format stream-json` runs a prompt without the UI, which can script the demo.
 - Repos carrying several manifests are normal. Skills must sit one folder deep, `hooks.json` must use Antigravity's own format, and `rules/` is shared with Cursor.
-- `databricks/databricks-agent-skills` builds Claude, Codex, Copilot and Cursor bundles from one source, but has no Antigravity target yet.
+- `databricks/databricks-agent-skills` builds Claude, Codex, Copilot and Cursor bundles from one source, but has no Antigravity target yet. It ships no MCP servers. Its root URL doesn't install with `agy plugin install` ("could not detect plugin structure"). Its Claude bundle does install, from `https://github.com/databricks/databricks-agent-skills/tree/main/plugins/databricks/claude` or a local path, giving 34 skills and no MCP. `agy plugin validate --strict` rejects its Claude and Cursor bundles because they have no native `plugin.json` (#25).
 - Genie One MCP is GA at `https://<workspace>/ai-gateway/mcp-services/system.ai.genie_one_mcp` (scope `ai-gateway`). Its tools are `genie_ask`, `genie_poll_response`, `genie_get_query_result`, `genie_cancel_response` and `view_ask`. The older `/api/2.0/mcp/genie` turns off on 2026-10-31. The per-space `/api/2.0/mcp/genie/{space_id}` (scope `genie`) stays.
 - Sign-in: Databricks has no dynamic client registration, so Antigravity's automatic OAuth can't connect on its own. Direct OAuth needs an admin-registered OAuth app. PATs work, but would sit in plain text in `config.json`. A local bridge that gets fresh tokens from `databricks auth token` works with no admin step; Databricks' `ug mcp-proxy` does this in Python too.
-- The Genie skills (`databricks-data-discovery`, `databricks-genie-agents`) drive Genie through the CLI (`databricks genie ask`, which CLI v1.19.0 has), not through MCP. They should work unchanged in Antigravity with `databricks-core` bundled and the CLI logged in. They're under the Databricks License, which allows redistribution with the license included and changes marked.
+- The Genie skills (`databricks-data-discovery`, `databricks-genie-agents`) drive Genie through the CLI (`databricks genie ask`, which CLI v1.22.1 has), not through MCP. They should work unchanged in Antigravity if `databricks-core` is installed alongside them and the CLI is logged in. We don't bundle them (see Decisions). They're under the Databricks License, which allows redistribution with the license included and changes marked.
 - Antigravity is three products: the desktop app (2.24.0, which holds the plugin engine), the IDE (2.5.5, VS Code-style, Open VSX), and the `agy` CLI (`curl -fsSL https://antigravity.google/cli/install.sh | bash`). Plugins apply to all three.
 
 **This machine**
 
-- Two apps are installed: Antigravity 2.24.0 (`/Applications/Antigravity.app`) and Antigravity IDE 2.5.5 (`/Applications/Antigravity IDE.app`). Config moved to `~/.gemini/config/`, and `mcp_config.json` there is empty. `agy` is not on PATH.
-- Databricks CLI v1.19.0 is installed. Its `aitools` installer linked 9 Databricks skills into `~/.gemini/antigravity/global_skills/`; the CLI's `libs/aitools/agents/agents.go` treats Antigravity as skills-only. None of the 9 cover Genie. Genie skills exist at `~/.databricks/aitools/skills/databricks-data-discovery` and in the Claude Code Databricks plugin (`databricks-genie-agents`).
+- Two apps are installed: Antigravity 2.24.0 (`/Applications/Antigravity.app`) and Antigravity IDE 2.5.5 (`/Applications/Antigravity IDE.app`). Config moved to `~/.gemini/config/`, and `mcp_config.json` there is empty. `agy` 1.4.5 is installed at `~/.local/bin/agy`. Its installer put `~/.local/bin` on PATH in `~/.profile`, `~/.zprofile` and `~/.zshrc`, so only shells opened before the install need the full path.
+- Databricks CLI v1.22.1 is installed. Its `aitools` installer linked 15 Databricks skills into `~/.gemini/antigravity/global_skills/`, including `databricks-core` and `databricks-genie-agents`. Antigravity 2.24 doesn't read that folder, so none of them show up (confirmed in #25). The CLI's `libs/aitools/agents/agents.go` treats Antigravity as skills-only.
 
 ## Decisions
 
 - First user (#5): a developer at a Databricks customer standardized on Google's AI tools. They're building in Antigravity against governed data that their data team already serves through a Genie space. Their first question is a business metric the agent would otherwise guess at, e.g. "Top 10 products by revenue last quarter vs. the prior quarter?", then "By region?", with Genie's SQL going into their code. Business users are out of scope. This is the director's call; the user can override it.
-- Sign-in (#8): a Python bridge inside the plugin (standard library only, Python 3.9+) gets a fresh token from `databricks auth token --profile` on each request and forwards calls to the Genie One MCP. The plugin has no settings: the bridge reads the workspace from `databricks auth describe`, using the `DEFAULT` profile or `DATABRICKS_CONFIG_PROFILE`. The Genie skills ship alongside as know-how and a CLI fallback, and a rule says to prefer the MCP tools. Build the skills first, then the bridge; demo the bridge. No PATs in settings. Admin-registered OAuth is documented, not built.
+- Sign-in (#8): a Python bridge inside the plugin (standard library only, Python 3.9+) gets a fresh token from `databricks auth token --profile` on each request and forwards calls to the Genie One MCP. The plugin has no settings: the bridge reads the workspace from `databricks auth describe`, using the `DEFAULT` profile or `DATABRICKS_CONFIG_PROFILE`. Only the plugin's own skill (`antigravity-databricks-genie`) ships, and it includes a CLI fallback (`databricks genie ask`); an always-on rule says to prefer the MCP tools. Build the skills first, then the bridge; demo the bridge. No PATs in settings. Admin-registered OAuth is documented, not built. On 2026-10-21 the user confirmed it stays CLI-brokered U2M OAuth (`databricks auth login`).
 
 - Demo setup (#10, decided by the user): the `DEFAULT` CLI profile (a serverless FEVM workspace), with a new Genie space to be created over its sample data. Installing `agy` and running the spike (#21) are approved.
+- Standalone connector (#25, #26, decided by the user on 2026-10-22): the plugin is a standalone way to connect Antigravity to Databricks Genie. It doesn't assume other Databricks skills are installed, and it doesn't bundle Databricks' published skills. There's no upstream work in `databricks/databricks-agent-skills`. The skill is renamed `antigravity-databricks-genie`, so its slash command is `/antigravity-databricks-genie`; the MCP server key stays `genie` (`databricks-genie_genie`). The bridge waits up to 300 s for Genie. The plugin is version 0.2.0.
 
 ## Open questions
 

@@ -2,6 +2,7 @@
 
 Runs the real bridge under Python against a stand-in `databricks` CLI and a stand-in Genie MCP server.
 """
+import importlib.util
 import json
 import os
 import queue
@@ -275,3 +276,55 @@ def test_asks_the_cli_for_a_new_token_shortly_before_the_old_one_expires(start, 
     bridge.reply()
 
     assert cli_calls(cli) == ["auth token --profile DEMO --output json"] * 2
+
+
+def load_bridge():
+    """The bridge module loaded in this process, so a test can replace `urlopen`."""
+    spec = importlib.util.spec_from_file_location("genie_bridge", BRIDGE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class FakeCli:
+    login_hint = "Run: databricks auth login --profile TEST"
+
+    def token(self):
+        return "tok-test"
+
+    def invalidate(self):
+        pass
+
+
+class FakeResponse:
+    status = 200
+    headers = {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exception):
+        return False
+
+    def read(self):
+        return b'{"jsonrpc":"2.0","id":1,"result":{}}'
+
+
+def test_waits_up_to_five_minutes_for_genie():
+    assert load_bridge().UPSTREAM_TIMEOUT_SECONDS == 300
+
+
+def test_gives_urlopen_the_upstream_timeout(monkeypatch):
+    bridge = load_bridge()
+    timeouts = []
+
+    def fake_urlopen(request, timeout=None):
+        timeouts.append(timeout)
+        return FakeResponse()
+
+    monkeypatch.setattr(bridge.urllib.request, "urlopen", fake_urlopen)
+    context = {"url": "http://example.invalid/x", "cli": FakeCli(), "session_id": None}
+
+    bridge.forward(INITIALIZE, context)
+
+    assert timeouts == [bridge.UPSTREAM_TIMEOUT_SECONDS]

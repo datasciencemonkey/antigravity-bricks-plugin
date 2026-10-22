@@ -16,6 +16,7 @@ from datetime import datetime
 
 GENIE_ONE_PATH = "/ai-gateway/mcp-services/system.ai.genie_one_mcp"
 REFRESH_MARGIN_SECONDS = 60
+UPSTREAM_TIMEOUT_SECONDS = 300
 
 
 def genie_url(host):
@@ -113,7 +114,7 @@ def forward(message, context):
             headers["Mcp-Session-Id"] = context["session_id"]
         request = urllib.request.Request(context["url"], data=json.dumps(message).encode(), headers=headers, method="POST")
         try:
-            with urllib.request.urlopen(request, timeout=120) as response:
+            with urllib.request.urlopen(request, timeout=UPSTREAM_TIMEOUT_SECONDS) as response:
                 status, response_headers, text = response.status, response.headers, response.read().decode()
         except urllib.error.HTTPError as error:
             status, response_headers, text = error.code, error.headers, error.read().decode(errors="replace")

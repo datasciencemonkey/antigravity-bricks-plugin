@@ -9,5 +9,8 @@
 # Reference material kept out of git
 Antigravity Plugin Marketplace Publishing Guide.pdf
 
+# Hook config the Superset app writes into each worktree
+.github/hooks/superset-notify.json
+
 # Python bytecode (uv's .venv and pytest's cache ignore themselves)
 __pycache__/

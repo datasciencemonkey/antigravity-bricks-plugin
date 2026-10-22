@@ -9,6 +9,7 @@ from pathlib import Path
 import yaml
 
 PLUGIN = Path(__file__).resolve().parent.parent / "plugins" / "databricks-genie"
+SKILL = "antigravity-databricks-genie"
 # The 2.24.0 loader reads only these keys; `author` and `homepage` are silently dropped.
 LOADER_KEYS = {"name", "description", "displayName", "logo", "suggestedPrompts", "version", "disabled", "skills"}
 PLACEHOLDERS = {"PLUGIN_ROOT", "PLUGIN_DATA"}
@@ -92,6 +93,21 @@ def test_skills_have_frontmatter_the_loader_accepts():
         assert 1 <= len(front["description"]) <= 1024
 
 
+def test_the_plugin_ships_exactly_one_skill_and_it_is_antigravity_databricks_genie():
+    folders = [path.name for path in (PLUGIN / "skills").iterdir() if path.is_dir()]
+
+    assert folders == [SKILL]
+
+
+def test_the_skill_is_named_antigravity_databricks_genie_so_its_slash_command_is_too():
+    assert frontmatter(PLUGIN / "skills" / SKILL / "SKILL.md")["name"] == SKILL
+
+
+def test_the_rule_and_readme_point_at_the_skill_by_its_current_name():
+    for document in ("rules/AGENTS.md", "README.md"):
+        assert f"`{SKILL}`" in (PLUGIN / document).read_text()
+
+
 def test_the_always_on_rule_steers_data_questions_to_genie():
     rule = (PLUGIN / "rules" / "AGENTS.md").read_text()
     assert "genie_ask" in rule
@@ -116,6 +132,13 @@ def test_antigravitys_own_strict_validator_finds_nothing_wrong():
 
 def test_the_skill_names_the_server_antigravity_registers_so_the_agent_can_call_genie_directly():
     # Antigravity registers plugin servers as <plugin>_<server> and exposes their tools through call_mcp_tool.
-    skill = (PLUGIN / "skills" / "genie" / "SKILL.md").read_text()
+    skill = (PLUGIN / "skills" / SKILL / "SKILL.md").read_text()
     assert "call_mcp_tool" in skill
     assert f"{manifest()['name']}_{next(iter(mcp_config()['mcpServers']))}" in skill
+
+
+def test_the_skill_says_to_poll_again_with_the_same_ids_when_a_poll_times_out():
+    skill = (PLUGIN / "skills" / SKILL / "SKILL.md").read_text()
+    (step,) = [line.lower() for line in skill.splitlines() if "genie_poll_response" in line]
+
+    assert "time" in step and "poll again" in step and "same" in step

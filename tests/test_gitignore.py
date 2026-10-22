@@ -2,15 +2,24 @@ import pytest
 
 from tools import repo_checks
 
-REQUIRED = [".omc/", ".isaac/", ".build/", "Antigravity Plugin Marketplace Publishing Guide.pdf"]
+SUPERSET_HOOKS = ".github/hooks/superset-notify.json"  # the Superset app writes this into every worktree
+REQUIRED = [".omc/", ".isaac/", ".build/", "Antigravity Plugin Marketplace Publishing Guide.pdf", SUPERSET_HOOKS]
 
 
 def test_reports_every_required_entry_missing_from_an_empty_gitignore():
     findings = repo_checks.find_missing_gitignore_entries("")
 
-    assert [finding.where for finding in findings] == [".gitignore"] * 4
+    assert [finding.where for finding in findings] == [".gitignore"] * len(REQUIRED)
     for entry in REQUIRED:
         assert sum(entry in finding.what for finding in findings) == 1
+
+
+def test_flags_a_gitignore_that_does_not_ignore_the_superset_hooks_file():
+    others = [entry for entry in REQUIRED if entry != SUPERSET_HOOKS]
+
+    findings = repo_checks.find_missing_gitignore_entries("\n".join(others) + "\n")
+
+    assert [finding.what for finding in findings] == [f"missing entry: {SUPERSET_HOOKS}"]
 
 
 COMPLETE = "# local state\n" + "\n".join(REQUIRED) + "\n\n.claude/settings.local.json\n"
