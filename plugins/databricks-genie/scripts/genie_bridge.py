@@ -16,7 +16,8 @@ from datetime import datetime
 
 GENIE_ONE_PATH = "/ai-gateway/mcp-services/system.ai.genie_one_mcp"
 REFRESH_MARGIN_SECONDS = 60
-UPSTREAM_TIMEOUT_SECONDS = 300
+UPSTREAM_TIMEOUT_SECONDS = 150  # must end before Antigravity's 3-minute limit on each tool call
+CLI_TIMEOUT_SECONDS = 30
 
 
 def genie_url(host):
@@ -59,7 +60,7 @@ class DatabricksCli:
         try:
             result = subprocess.run(
                 [cli, *args, "--profile", self.profile, "--output", "json"],
-                env=self.cli_env, capture_output=True, text=True, timeout=30,
+                env=self.cli_env, capture_output=True, text=True, timeout=CLI_TIMEOUT_SECONDS,
             )
         except (OSError, subprocess.TimeoutExpired):
             raise BridgeError(failure + " " + self.login_hint)

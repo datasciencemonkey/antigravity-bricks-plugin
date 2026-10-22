@@ -310,8 +310,17 @@ class FakeResponse:
         return b'{"jsonrpc":"2.0","id":1,"result":{}}'
 
 
-def test_waits_up_to_five_minutes_for_genie():
-    assert load_bridge().UPSTREAM_TIMEOUT_SECONDS == 300
+def test_waits_up_to_150_seconds_for_genie():
+    assert load_bridge().UPSTREAM_TIMEOUT_SECONDS == 150
+
+
+def test_gives_up_before_antigravitys_three_minute_call_limit():
+    """Antigravity cuts each MCP tool call off at 3 minutes (#28). The bridge handles one request at a time, so even a call
+    that first needs a token from the CLI has to end before that, and leave the bridge free for the agent's next poll."""
+    antigravity_call_limit_seconds = 180
+    bridge = load_bridge()
+
+    assert bridge.UPSTREAM_TIMEOUT_SECONDS + bridge.CLI_TIMEOUT_SECONDS <= antigravity_call_limit_seconds
 
 
 def test_gives_urlopen_the_upstream_timeout(monkeypatch):
@@ -328,3 +337,19 @@ def test_gives_urlopen_the_upstream_timeout(monkeypatch):
     bridge.forward(INITIALIZE, context)
 
     assert timeouts == [bridge.UPSTREAM_TIMEOUT_SECONDS]
+
+
+def test_gives_subprocess_run_the_cli_timeout(monkeypatch):
+    bridge = load_bridge()
+    timeouts = []
+
+    def fake_run(command, **options):
+        timeouts.append(options.get("timeout"))
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(bridge.subprocess, "run", fake_run)
+    monkeypatch.setattr(bridge, "CLI_TIMEOUT_SECONDS", 7)  # not the real value, so a hard-coded number would fail
+
+    bridge.DatabricksCli({"DATABRICKS_CLI": "databricks"}).run(["auth", "token"], "Couldn't get a Databricks token from the CLI.")
+
+    assert timeouts == [7]
