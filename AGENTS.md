@@ -69,7 +69,7 @@ Work is tracked as issues on the [project board](https://github.com/users/datasc
 
 ## Working rules
 
-- Questions and dispatch plans go to the `director` subagent first (`.claude/agents/director.md`). It keeps the work on one to-do at a time, investigates questions with its tools, and says when only the user can decide. Consult it before dispatching any other subagent.
+- Questions and dispatch plans go to the `director` subagent first (`.claude/agents/director.md`). It runs distinct to-dos in parallel and sequences the rest, investigates questions with its tools, and says when only the user can decide. Consult it before dispatching any other subagent.
 - Every to-do and idea is an issue on the board, assigned to `datasciencemonkey`; move it Todo → In Progress → Done as work happens, and never close one without that assignee. Local helper: `uv run python .omc/scripts/board.py move <issue> "<status>"`.
 - Use `uv` to run anything. Every commit is authored and committed as datasciencemonkey@gmail.com.
 - Build everything test-first: write a failing test, watch it fail, then write the code. `uv run --locked pytest` is the one test command. It also scans for internal-only references, secrets, real workspace hostnames and wrong commit identities.
