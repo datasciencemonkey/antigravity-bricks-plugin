@@ -253,7 +253,9 @@ def test_items_that_are_not_pull_request_objects_are_skipped():
     assert notes_for(None, 5, "text", [], pr(1, "Real")).count("(#") == 1
 
 
-@pytest.mark.parametrize("tag", ["v1", "latest", "1.2.3", "v1.2.3-rc1", "v1.2.3; rm -rf /", "v1.2.3\n## Injected", ""])
+@pytest.mark.parametrize(
+    "tag", ["v1", "latest", "1.2.3", "v1.2.3-rc1", "v1.2.3; rm -rf /", "v1.2.3\n## Injected", "", "v0.3.01", "v01.0.0", "v1.02.3"]
+)
 def test_a_previous_tag_that_is_not_a_release_tag_is_refused(tag):
     with pytest.raises(ValueError):
         release_notes.build_notes([], SHAS, tag)
@@ -398,7 +400,7 @@ def test_the_previous_tag_is_the_highest_release_tag_merged_into_the_head(repo):
     repo.commit("b")
     repo.git("tag", "v0.10.0")  # numerically above v0.9.0, though it sorts below it as text
     repo.commit("c")
-    for name in ("v0.9.0", "v1", "latest", "v0.11.0-rc1", "release-9.9.9", "v1.2.3.4", "V2.0.0"):
+    for name in ("v0.9.0", "v1", "latest", "v0.11.0-rc1", "release-9.9.9", "v1.2.3.4", "V2.0.0", "v0.12.01", "v01.0.0"):
         repo.git("tag", name)
     other = repo.commit("on a branch that is not merged")
     repo.git("tag", "v9.9.9")
@@ -422,6 +424,14 @@ def test_the_commits_since_a_tag_are_the_ones_after_it(repo):
     b, c = repo.commit("b"), repo.commit("c")
 
     assert release_notes.commits_since("v0.1.0", c, cwd=repo.path) == {b, c}
+
+
+@pytest.mark.parametrize("tag", ["v0.3.01", "v01.0.0", "latest", "v1"])
+def test_commits_since_a_name_that_is_not_a_release_tag_is_refused(tag, repo):
+    head = repo.commit("a")
+
+    with pytest.raises(ValueError):
+        release_notes.commits_since(tag, head, cwd=repo.path)
 
 
 def test_without_a_tag_all_history_up_to_the_head_counts(repo):

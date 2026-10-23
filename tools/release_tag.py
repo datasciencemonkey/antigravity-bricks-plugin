@@ -7,8 +7,9 @@ carry. The version rule:
   string. This tool and the workflow never compute, bump or write a version.
 - Each release bumps only the last number: 0.3.0, then 0.3.1, then 0.3.2. A person changes the manifest; the workflow
   only reads it.
-- The version must be exactly three numbers separated by dots. Anything else ("1.0.0; rm -rf /", "v1", an empty
-  string) prints no tag, says why on stderr and exits with status 1, so the workflow stops before it tags anything.
+- The version must be exactly three numbers separated by dots, with no leading zero in any of them. Anything else
+  ("1.0.0; rm -rf /", "v1", "0.3.01", an empty string) prints no tag, says why on stderr and exits with status 1, so
+  the workflow stops before it tags anything. (0.3.01 would name the release 0.3.1 under a second name.)
 
 Standard library only: the runner runs it with a bare python3.
 """
@@ -21,7 +22,9 @@ from pathlib import Path
 MANIFEST = Path(__file__).resolve().parent.parent / "plugins" / "databricks-genie" / "plugin.json"
 
 # Not ^...$ (the $ accepts a trailing newline), and ASCII only (a bare \d also matches digits from other scripts).
-VERSION = re.compile(r"\d+\.\d+\.\d+", re.ASCII)
+# Each number is 0 or starts with 1-9, so 0.3.01 and 0.3.1 can't both be versions. tools/release_notes.py has the same
+# rule for the tags it reads.
+VERSION = re.compile(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", re.ASCII)
 
 
 class VersionError(Exception):
@@ -41,7 +44,10 @@ def read_version(manifest):
         raise VersionError(f'{manifest} has no "version" string')
     if not VERSION.fullmatch(version):
         # repr() keeps a newline in the value from starting a line of its own in the log.
-        raise VersionError(f"the version {version[:60]!r} in {manifest} is not three numbers separated by dots (like 0.3.1)")
+        raise VersionError(
+            f"the version {version[:60]!r} in {manifest} is not three numbers without leading zeros, separated by dots "
+            "(like 0.3.1)"
+        )
     return version
 
 

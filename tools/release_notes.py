@@ -25,7 +25,8 @@ import unicodedata
 from pathlib import Path
 from typing import NamedTuple
 
-TAG = re.compile(r"v(\d+)\.(\d+)\.(\d+)", re.ASCII)
+# A release tag: v plus a version as tools/release_tag.py accepts it (three numbers, no leading zeros).
+TAG = re.compile(r"v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", re.ASCII)
 SHA = re.compile(r"[0-9a-f]{40}")
 
 # What a pull request may contribute. GitHub caps a release body at 125,000 characters and adds its generated list

@@ -53,6 +53,7 @@ def test_the_docstring_states_the_version_rule():
 
     assert "last number" in doc and "0.3.0" in doc and "0.3.1" in doc and "0.3.2" in doc
     assert "manifest" in doc and "never" in doc
+    assert "leading zero" in doc
 
 
 INVALID_VERSIONS = [
@@ -72,6 +73,13 @@ INVALID_VERSIONS = [
     "-1.0.0",
     " 1.0.0",
     "1.0.0 ",
+    "0.3.01",  # a leading zero would let one release go by two names (0.3.1 and 0.3.01)
+    "01.0.0",
+    "1.02.3",
+    "00.0.0",
+    "0.00.0",
+    "0.0.00",
+    "007.0.0",
     "1.0.0\n",  # `$` in a pattern would let this through
     "1.0.0\n::error::forged workflow command",
     "$(id)",
@@ -129,7 +137,7 @@ def test_a_bad_version_makes_the_script_exit_non_zero_so_a_workflow_step_stops(t
     assert result.stdout == ""
 
 
-@pytest.mark.parametrize("version", ["0.0.0", "0.3.0", "0.3.1", "10.20.30", "0.3.100"])
+@pytest.mark.parametrize("version", ["0.0.0", "0.3.0", "0.3.1", "0.3.10", "0.10.0", "10.20.30", "0.3.100", "100.200.300"])
 def test_every_three_number_version_is_accepted(version, tmp_path, capsys):
     code, out, _ = run_main(manifest_with(tmp_path, {"version": version}), capsys)
 
