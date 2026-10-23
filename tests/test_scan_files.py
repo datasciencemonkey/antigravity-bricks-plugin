@@ -1,4 +1,5 @@
 import pytest
+from conftest import FAKE_HOST
 
 from tools import repo_checks
 
@@ -26,7 +27,7 @@ def test_also_flags_a_secret_in_a_committed_file(repo):
 @pytest.mark.parametrize(
     "line",
     [
-        "see https://" + "databricks" + ".slack.com/archives/C1",
+        "see https://docs.google" + ".com/document/d/1AbCdEf_-1234567890/edit",
         "host: https://dbc-1a2b3c4d-e5f6" + ".cloud.databricks.com",
     ],
     ids=["internal reference", "workspace hostname"],
@@ -35,6 +36,14 @@ def test_files_get_the_internal_reference_and_hostname_checks_too(repo, line):
     repo.write("docs/page.md", f"intro\n{line}\n")
 
     findings = repo_checks.scan_files(repo.path)
+
+    assert [finding.where for finding in findings] == ["docs/page.md:2"]
+
+
+def test_files_get_the_deny_list_too(repo, fake_denylist):
+    repo.write("docs/page.md", f"intro\nsee https://{FAKE_HOST}/page\n")
+
+    findings = repo_checks.scan_files(repo.path, denylist=fake_denylist)
 
     assert [finding.where for finding in findings] == ["docs/page.md:2"]
 

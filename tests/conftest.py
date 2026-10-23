@@ -3,7 +3,19 @@ import subprocess
 
 import pytest
 
+from tools import repo_checks
+
 GOOD_EMAIL = "datasciencemonkey@gmail.com"
+
+# Made-up organization-specific patterns for the deny-list tests. The real ones live in a git-ignored local file, and
+# no real internal identifier may appear in a tracked file.
+FAKE_HOST = "example-internal.invalid"
+FAKE_TRACKER = "example-tracker.invalid"
+FAKE_DENYLIST = r"""# made-up patterns, one regular expression per line
+(?i)example-internal\.invalid
+(?i)example-tracker\.invalid
+\b(?:EXAMPLE|DEMO)-\d+\b
+"""
 
 # Git exports GIT_DIR and friends to hooks, aliases and `rebase --exec`. Inherited here, they would aim every temporary
 # repo's git commands at the real repository, so clear them before any test runs.
@@ -58,3 +70,17 @@ def repo(tmp_path):
     temp.commit("Base commit")
     temp.git("update-ref", "refs/remotes/origin/main", "HEAD")
     return temp
+
+
+@pytest.fixture
+def fake_denylist_file(tmp_path):
+    """A deny-list file holding the made-up patterns (outside the temporary repo, which is tmp_path/repo)."""
+    path = tmp_path / "denylist.txt"
+    path.write_text(FAKE_DENYLIST)
+    return path
+
+
+@pytest.fixture
+def fake_denylist(fake_denylist_file):
+    """The made-up patterns, compiled into scan rules."""
+    return repo_checks.read_denylist(fake_denylist_file)

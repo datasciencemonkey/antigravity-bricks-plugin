@@ -1,3 +1,5 @@
+from conftest import FAKE_HOST, FAKE_TRACKER
+
 from tools import repo_checks
 
 # Fixtures are assembled at runtime so this file passes the repo-wide scan itself.
@@ -14,6 +16,18 @@ def test_reports_findings_from_files(repo):
     findings = repo_checks.scan_repo(repo.path)
 
     assert [finding.where for finding in findings] == ["leak.txt:1"]
+
+
+def test_reports_deny_listed_text_from_files_and_commit_messages(repo, fake_denylist):
+    repo.write("docs/page.md", f"see https://{FAKE_HOST}\n")
+    sha = repo.commit(f"Add page\n\nSee https://{FAKE_TRACKER}\n")
+
+    findings = repo_checks.scan_repo(repo.path, denylist=fake_denylist)
+
+    assert [(finding.check, finding.where) for finding in findings] == [
+        ("internal-reference", "docs/page.md:1"),
+        ("internal-reference", f"commit {sha[:7]} message:3"),
+    ]
 
 
 def test_reports_required_gitignore_entries_that_are_missing(repo):

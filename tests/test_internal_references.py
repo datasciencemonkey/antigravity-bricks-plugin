@@ -1,48 +1,21 @@
+import re
+
 import pytest
+from conftest import FAKE_HOST, FAKE_TRACKER
 
 from tools.repo_checks import find_internal_references
 
 # Fixtures are assembled at runtime, so this file never contains an internal reference itself
 # (the repo-wide scan covers tests/ too).
-SLACK = "databricks" + ".slack.com"
-ATLASSIAN = "databricks" + ".atlassian.net"
 GLEAN = "glean" + ".com"
-TECH_DOCS = "tech-docs" + ".dev.databricks.com"
-UNIVERSE = "databricks-eng" + "/universe"
 GOOGLE_DOCS = "docs.google" + ".com"
 GO = "go" + "/"  # prefix of an internal go-link
-AUTH_KEY = "AUTH" + "-"  # prefixes of internal Jira projects
-FEIP_KEY = "FEIP" + "-"
-INTERNAL_TAG = "[INTER" + "NAL]"  # the literal tag that marks internal-only material
-
-
-def test_flags_the_internal_slack_workspace_with_its_location():
-    findings = find_internal_references(f"intro\nask in https://{SLACK}/archives/C1\n", path="notes.md")
-
-    assert [finding.where for finding in findings] == ["notes.md:2"]
-    assert SLACK in findings[0].what
-
-
-def test_flags_the_internal_jira_site():
-    findings = find_internal_references(f"see https://{ATLASSIAN}/browse/X-1", path="notes.md")
-
-    assert [finding.where for finding in findings] == ["notes.md:1"]
+WORD = "INTER" + "NAL"  # the word inside the tag that marks internal-only material
+INTERNAL_TAG = f"[{WORD}]"
 
 
 def test_flags_the_glean_site():
     findings = find_internal_references(f"search https://app.{GLEAN}/q", path="notes.md")
-
-    assert [finding.where for finding in findings] == ["notes.md:1"]
-
-
-def test_flags_the_internal_tech_docs_site():
-    findings = find_internal_references(f"read https://{TECH_DOCS}/guide", path="notes.md")
-
-    assert [finding.where for finding in findings] == ["notes.md:1"]
-
-
-def test_flags_the_internal_universe_repo():
-    findings = find_internal_references(f"cloned from github.com/{UNIVERSE}/pull/1", path="notes.md")
 
     assert [finding.where for finding in findings] == ["notes.md:1"]
 
@@ -78,9 +51,74 @@ def test_flags_go_links_written_as_urls_and_inside_punctuation(text):
     assert len(find_internal_references(text, path="notes.md")) == 1
 
 
-@pytest.mark.parametrize("key", [f"{AUTH_KEY}123", f"{FEIP_KEY}4567"])
-def test_flags_jira_keys_with_the_known_internal_prefixes(key):
-    findings = find_internal_references(f"tracked in {key} for now", path="notes.md")
+def test_flags_the_literal_internal_tag():
+    findings = find_internal_references(f"Source: wiki page {INTERNAL_TAG}", path="notes.md")
+
+    assert [finding.where for finding in findings] == ["notes.md:1"]
+    assert INTERNAL_TAG in findings[0].what
+
+
+TAGGED_FORMS = [
+    f"[{WORD.title()}]",
+    f"[{WORD}: from the wiki]",
+    "[" + WORD.lower() + "-only]",
+    f"[{WORD} ONLY]",
+    f"[{WORD.title()} Use Only]",
+    "[" + WORD.lower() + "_only: a note]",
+    f"[ {WORD} ]",
+]
+
+
+@pytest.mark.parametrize("tag", TAGGED_FORMS)
+def test_flags_tagged_forms_of_the_internal_tag_in_any_case(tag):
+    findings = find_internal_references(f"Source: wiki page {tag}", path="notes.md")
+
+    assert [finding.where for finding in findings] == ["notes.md:1"]
+    assert tag in findings[0].what
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "see [internal-reference] in the report",
+        "read the [internal docs](https://example.test/docs)",
+        "[internals] and [internally hosted]",
+        "items[internal_state] = 1",
+        "an internal-only note without brackets",
+    ],
+)
+def test_does_not_flag_bracketed_words_that_merely_start_with_internal(text):
+    assert find_internal_references(text, path="notes.md") == []
+
+
+# --- patterns from the local deny-list (made up here; the real ones are in a git-ignored file) ------------------------
+
+
+def test_flags_text_that_matches_a_deny_list_pattern_with_its_location(fake_denylist):
+    text = f"intro\nask in https://{FAKE_HOST}/archives/C1\n"
+
+    findings = find_internal_references(text, path="notes.md", denylist=fake_denylist)
+
+    assert [finding.where for finding in findings] == ["notes.md:2"]
+    assert findings[0].check == "internal-reference"
+    assert FAKE_HOST in findings[0].what
+
+
+@pytest.mark.parametrize("host", [FAKE_HOST, FAKE_TRACKER, FAKE_HOST.upper()])
+def test_flags_every_host_in_the_list_in_any_case_the_list_asks_for(fake_denylist, host):
+    findings = find_internal_references(f"see https://{host}/page", path="notes.md", denylist=fake_denylist)
+
+    assert [finding.where for finding in findings] == ["notes.md:1"]
+    assert host in findings[0].what
+
+
+def test_does_not_flag_deny_listed_text_when_there_is_no_list():
+    assert find_internal_references(f"see https://{FAKE_HOST}/page", path="notes.md") == []
+
+
+@pytest.mark.parametrize("key", ["EXAMPLE-123", "DEMO-4567"])
+def test_flags_ticket_keys_with_the_prefixes_in_the_list(fake_denylist, key):
+    findings = find_internal_references(f"tracked in {key} for now", path="notes.md", denylist=fake_denylist)
 
     assert [finding.where for finding in findings] == ["notes.md:1"]
     assert key in findings[0].what
@@ -88,17 +126,25 @@ def test_flags_jira_keys_with_the_known_internal_prefixes(key):
 
 @pytest.mark.parametrize(
     "text",
-    ["SHA-256 digest", "UTF-8 text", "ISO-8601 dates", "CVE-2024-1234", "OAUTH-2 flow", "AUTH- without a number"],
+    [
+        "SHA-256 digest",
+        "UTF-8 text",
+        "ISO-8601 dates",
+        "CVE-2024-1234",
+        "COUNTEREXAMPLE-2 flow",
+        "EXAMPLE- without a number",
+    ],
 )
-def test_does_not_flag_generic_upper_case_keys(text):
-    assert find_internal_references(text, path="notes.md") == []
+def test_does_not_flag_generic_upper_case_keys(fake_denylist, text):
+    assert find_internal_references(text, path="notes.md", denylist=fake_denylist) == []
 
 
-def test_flags_the_literal_internal_tag():
-    findings = find_internal_references(f"Source: wiki page {INTERNAL_TAG}", path="notes.md")
+def test_a_pattern_that_can_also_match_nothing_does_not_flag_every_line():
+    rules = [("deny-list pattern", re.compile(r"example-internal\.invalid|"))]  # the stray | adds an empty alternative
 
-    assert [finding.where for finding in findings] == ["notes.md:1"]
-    assert INTERNAL_TAG in findings[0].what
+    findings = find_internal_references("fine\nexample-internal.invalid\nfine\n", path="notes.md", denylist=rules)
+
+    assert [finding.where for finding in findings] == ["notes.md:2"]
 
 
 @pytest.mark.parametrize(

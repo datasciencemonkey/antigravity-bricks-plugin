@@ -8,7 +8,7 @@ from tools import repo_checks
 
 # Fixtures are assembled at runtime so this file passes the repo-wide scan itself.
 PAT = "dapi" + "0123456789abcdef" * 2
-SLACK = "databricks" + ".slack.com"
+GOOGLE_DOC = "https://docs.google" + ".com/document/d/1AbCdEf_-1234567890/edit"
 AWS_HOST = "dbc-1a2b3c4d-e5f6" + ".cloud.databricks.com"
 
 
@@ -53,7 +53,7 @@ def test_stdin_mode_exits_zero_for_clean_text_and_needs_no_git_repo(tmp_path, mo
 
 def test_stdin_mode_exits_non_zero_and_reports_each_finding_with_its_line(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("sys.stdin", io.StringIO(f"Summary\nSee https://{SLACK}/archives/C1 and https://{AWS_HOST}\n"))
+    monkeypatch.setattr("sys.stdin", io.StringIO(f"Summary\nSee {GOOGLE_DOC} and https://{AWS_HOST}\n"))
 
     status = repo_checks.main(["--stdin"])
 
@@ -83,7 +83,7 @@ def test_module_entry_point_scans_the_repo_and_fails_on_a_leak(repo):
 
 def test_module_entry_point_checks_piped_text_with_stdin(tmp_path):
     clean = run_module(tmp_path, "--stdin", stdin_text="nothing to see here\n")
-    leaky = run_module(tmp_path, "--stdin", stdin_text=f"see https://{SLACK}/archives/C1\n")
+    leaky = run_module(tmp_path, "--stdin", stdin_text=f"see {GOOGLE_DOC}\n")
 
     assert clean.returncode == 0
     assert leaky.returncode == 1

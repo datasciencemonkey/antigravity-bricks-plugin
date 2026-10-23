@@ -1,10 +1,12 @@
 import pytest
+from conftest import FAKE_HOST
 
 from tools import repo_checks
 
 GOOD = "datasciencemonkey@gmail.com"
 OTHER = "someone" + "@example.com"
-SLACK = "databricks" + ".slack.com"  # built at runtime so this file passes the repo scan
+# built at runtime so this file passes the repo scan
+GOOGLE_DOC = "https://docs.google" + ".com/document/d/1AbCdEf_-1234567890/edit"
 
 
 def commit(author=GOOD, committer=GOOD, message="Do a thing", sha="abc1234" + "0" * 33):
@@ -53,9 +55,17 @@ def test_checks_every_commit_and_reports_each_wrong_role():
 
 
 def test_flags_internal_references_in_commit_messages():
-    message = f"Fix docs\n\nSee https://{SLACK}/archives/C1\n"
+    message = f"Fix docs\n\nSee {GOOGLE_DOC}\n"
 
     findings = repo_checks.scan_commit_messages([commit(message=message)])
+
+    assert [finding.where for finding in findings] == ["commit abc1234 message:3"]
+
+
+def test_flags_deny_listed_text_in_commit_messages(fake_denylist):
+    message = f"Fix docs\n\nSee https://{FAKE_HOST}/page\n"
+
+    findings = repo_checks.scan_commit_messages([commit(message=message)], denylist=fake_denylist)
 
     assert [finding.where for finding in findings] == ["commit abc1234 message:3"]
 

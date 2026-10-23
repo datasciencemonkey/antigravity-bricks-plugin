@@ -1,5 +1,10 @@
-"""Checks that keep internal material, secrets and wrong commit identities out of pushes."""
+"""Checks that keep internal material, secrets and wrong commit identities out of pushes.
+
+The repo is public, so the patterns that name this organization's own systems are not kept here. They live in a
+git-ignored local deny-list (see read_denylist); everything in this file is generic.
+"""
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -17,20 +22,18 @@ class Finding(NamedTuple):
 
 
 INTERNAL_REFERENCES = [
-    ("Slack workspace link", re.compile(r"databricks\.slack\.com", re.IGNORECASE)),
-    ("Jira site link", re.compile(r"databricks\.atlassian\.net", re.IGNORECASE)),
     ("Glean site link", re.compile(r"glean\.com", re.IGNORECASE)),
-    ("internal tech docs link", re.compile(r"tech-docs\.dev\.databricks\.com", re.IGNORECASE)),
-    # "[/]" keeps this source file from containing the literal repo path, so the repo scan doesn't flag itself.
-    ("internal GitHub repo", re.compile(r"databricks-eng[/]universe", re.IGNORECASE)),
     (
         "Google Docs/Sheets/Slides link",
         re.compile(r"docs\.google\.com/(?:document|spreadsheets|presentation)/d/[\w-]+", re.IGNORECASE),
     ),
     ("internal go-link", re.compile(r"(?:(?<![\w./-])|(?<=://))go/(?!no-?go\b)[\w-]+")),
-    # Only the known internal projects: a generic upper-case key pattern would also hit things like SHA-256.
-    ("internal Jira key", re.compile(r"\b(?:AUTH|FEIP)-\d+\b")),
-    ("internal-only tag", re.compile(r"\[INTERNAL\]")),
+    # The bare tag, its "only" and "use only" forms and a ": detail" qualifier, in any case. Other bracketed words
+    # that merely start with "internal", and link text such as "internal docs", are not tags.
+    (
+        "internal-only tag",
+        re.compile(r"\[\s*internal(?:[\s_-]+(?:only|use(?:[\s_-]+only)?))?\s*(?::[^\]\n]*)?\]", re.IGNORECASE),
+    ),
 ]
 
 # Lines that may contain an internal reference, as (file path, exact line text). Line numbers play no part.
@@ -57,7 +60,7 @@ def _scan(text, path, check, rules, allowed_lines=(), allowed_matches=(), redact
         for label, pattern in rules:
             for match in pattern.finditer(line):
                 matched = match.group(0)
-                if matched.lower() in allowed_matches:
+                if not matched or matched.lower() in allowed_matches:  # an empty match (a stray "|") names nothing
                     continue
                 if redact:  # a report must never repeat a secret in full
                     matched = f"{matched[:4]}... ({len(matched)} chars)"
@@ -65,8 +68,61 @@ def _scan(text, path, check, rules, allowed_lines=(), allowed_matches=(), redact
     return findings
 
 
-def find_internal_references(text, path="<text>"):
-    return _scan(text, path, "internal-reference", INTERNAL_REFERENCES, ALLOWED_LINES)
+def find_internal_references(text, path="<text>", denylist=()):
+    """The generic internal references, plus every match of the deny-list rules (see load_denylist)."""
+    return _scan(text, path, "internal-reference", INTERNAL_REFERENCES + list(denylist), ALLOWED_LINES)
+
+
+DENYLIST_ENV = "REPO_CHECKS_DENYLIST"
+
+
+class DenylistError(ValueError):
+    """The deny-list can't be used because one of its lines isn't a valid regular expression."""
+
+
+def denylist_path(root, environ=None):
+    """The deny-list file: $REPO_CHECKS_DENYLIST if that is set, else <root>/.omc/denylist.txt."""
+    override = (os.environ if environ is None else environ).get(DENYLIST_ENV)
+    return Path(override).expanduser() if override else Path(root) / ".omc" / "denylist.txt"
+
+
+def read_denylist(path):
+    """Compile a deny-list file into scan rules, or return None if there is no such file.
+
+    One Python regular expression per line; blank lines and lines starting with # are skipped. Matching is
+    case-sensitive: start a line with (?i) to ignore case. A line that isn't a valid expression raises DenylistError.
+    """
+    path = Path(path)
+    if not path.is_file():
+        return None
+    rules = []
+    for number, line in enumerate(path.read_text(encoding="utf-8-sig").split("\n"), start=1):
+        pattern = line.strip()
+        if not pattern or pattern.startswith("#"):
+            continue
+        try:
+            rules.append(("deny-list pattern", re.compile(pattern)))
+        except re.error as problem:
+            raise DenylistError(f"{path}:{number}: not a valid regular expression ({problem})") from problem
+    return rules
+
+
+def load_denylist(root, environ=None, warn=None):
+    """The deny-list rules for the repo at root.
+
+    Without a list there are no rules, and one warning goes to stderr (or to warn, if given).
+    """
+    path = denylist_path(root, environ)
+    rules = read_denylist(path)
+    if rules is not None:
+        return rules
+    warn = warn or (lambda message: print(message, file=sys.stderr))
+    warn(
+        f"repo checks: warning: no deny-list at {path}, so the organization-specific checks are off. To turn them on, "
+        f"put one regular expression per line in that file (blank lines and lines starting with # are skipped), "
+        f"or set {DENYLIST_ENV} to the path of a list kept elsewhere."
+    )
+    return []
 
 
 SECRETS = [
@@ -137,12 +193,12 @@ def find_bad_commit_identities(commits):
     return findings
 
 
-def scan_commit_messages(commits):
+def scan_commit_messages(commits, denylist=()):
     """Commit messages get the internal-reference and secret checks."""
     findings = []
     for commit in commits:
         where = f"commit {commit.sha[:7]} message"
-        findings += find_internal_references(commit.message, path=where)
+        findings += find_internal_references(commit.message, path=where, denylist=denylist)
         findings += find_secrets(commit.message, path=where)
     return findings
 
@@ -162,12 +218,14 @@ def read_commits(root, base="origin/main"):
     return [Commit(*record.split("\x1f", 5)) for record in log.split("\0") if record]
 
 
-def scan_text(text, path="<text>"):
+def scan_text(text, path="<text>", denylist=()):
     """All three text checks: internal references, secrets and workspace hostnames."""
-    return find_internal_references(text, path) + find_secrets(text, path) + find_workspace_hostnames(text, path)
+    return (
+        find_internal_references(text, path, denylist) + find_secrets(text, path) + find_workspace_hostnames(text, path)
+    )
 
 
-def scan_files(root):
+def scan_files(root, denylist=()):
     """Scan every file git would commit: tracked plus untracked, minus the ignored ones."""
     listing = subprocess.run(
         ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=root, capture_output=True, check=True
@@ -178,36 +236,46 @@ def scan_files(root):
         if name and path.is_file():  # tracked files deleted from the working tree are still listed
             data = path.read_bytes()
             if b"\0" not in data[:8000]:  # binary files are skipped, like git does when diffing
-                findings += scan_text(data.decode("utf-8", errors="replace"), path=name)
+                findings += scan_text(data.decode("utf-8", errors="replace"), path=name, denylist=denylist)
     return findings
 
 
-def scan_repo(root):
+def scan_repo(root, denylist=()):
     """Everything the push gate checks: files, .gitignore, and the commits in origin/main..HEAD."""
     gitignore = Path(root) / ".gitignore"
     gitignore_text = gitignore.read_text() if gitignore.exists() else ""
-    findings = scan_files(root) + find_missing_gitignore_entries(gitignore_text)
+    findings = scan_files(root, denylist) + find_missing_gitignore_entries(gitignore_text)
     try:
         commits = read_commits(root)
     except RuntimeError as problem:
         return findings + [Finding("commit-range", "origin/main", str(problem))]
-    return findings + find_bad_commit_identities(commits) + scan_commit_messages(commits)
+    return findings + find_bad_commit_identities(commits) + scan_commit_messages(commits, denylist)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Keep internal material, secrets and wrong commit identities out of pushes."
+        description="Keep internal material, secrets and wrong commit identities out of pushes.",
+        epilog=f"Organization-specific patterns come from a local deny-list: the file named by ${DENYLIST_ENV}, "
+        "else .omc/denylist.txt in the repo root. It holds one regular expression per line.",
     )
     parser.add_argument(
         "--stdin", action="store_true", help="check text piped in (for example PR or issue text) instead of the repo"
     )
     args = parser.parse_args(argv)
     if args.stdin:
-        findings = scan_text(sys.stdin.read(), path="<stdin>")
+        root = Path(__file__).resolve().parent.parent  # no repo is checked, so look for the list next to this tool
     else:
         toplevel = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=True)
         root = toplevel.stdout.strip()
-        findings = scan_repo(root)
+    try:
+        denylist = load_denylist(root)
+    except DenylistError as problem:
+        print(f"repo checks: {problem}", file=sys.stderr)
+        return 2
+    if args.stdin:
+        findings = scan_text(sys.stdin.read(), path="<stdin>", denylist=denylist)
+    else:
+        findings = scan_repo(root, denylist=denylist)
     if not findings:
         print("repo checks: no findings")
         return 0
