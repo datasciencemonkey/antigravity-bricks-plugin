@@ -3,6 +3,7 @@ import importlib.util
 import json
 import re
 import shutil
+import struct
 import subprocess
 from pathlib import Path
 
@@ -18,6 +19,8 @@ WORKSPACE_LINE = "Asking Genie in <host> (Databricks CLI profile <profile>)"
 # The 2.24.0 loader reads only these keys; `author` and `homepage` are silently dropped.
 LOADER_KEYS = {"name", "description", "displayName", "logo", "suggestedPrompts", "version", "disabled", "skills"}
 PLACEHOLDERS = {"PLUGIN_ROOT", "PLUGIN_DATA"}
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+PNG_RGBA = 6  # the IHDR color type for red, green, blue and alpha
 
 
 def manifest():
@@ -50,9 +53,18 @@ def test_manifest_has_the_marketplace_presentation_fields():
     assert 1 <= len(m["suggestedPrompts"]) <= 3 and all(p.strip() for p in m["suggestedPrompts"])
 
 
-def test_logo_is_a_bundled_svg():
+def test_logo_is_a_bundled_square_rgba_png_of_at_least_128_pixels():
+    # The guide asks for a square logo, 128 x 128 or larger, with transparent padding (so an alpha channel). The PNG's
+    # own header says all of that: signature, then the IHDR chunk (length, type, width, height, bit depth, color type).
     logo = PLUGIN / manifest()["logo"]
-    assert logo.suffix == ".svg" and logo.read_text().lstrip().startswith("<svg")
+    data = logo.read_bytes()
+
+    assert logo.suffix == ".png" and data.startswith(PNG_SIGNATURE)
+    length, chunk_type = struct.unpack(">I4s", data[8:16])
+    assert (length, chunk_type) == (13, b"IHDR")
+    width, height, _bit_depth, color_type = struct.unpack(">IIBB", data[16:26])
+    assert width == height >= 128
+    assert color_type == PNG_RGBA
 
 
 def test_the_only_mcp_server_is_the_local_genie_bridge():
