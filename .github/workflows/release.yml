@@ -1,0 +1,45 @@
+name: release
+
+# When the tests pass on a commit on main, tag that commit and publish a release for it, if its version has no tag yet.
+# The version is the one in plugins/databricks-genie/plugin.json (tools/release_tag.py reads it). This workflow never
+# bumps or edits it: a person raises the last number (0.3.0, 0.3.1, 0.3.2, ...) in the manifest.
+on:
+  workflow_run:
+    workflows: ["tests"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: write # gh release create makes the tag and the release; nothing else is granted
+
+jobs:
+  release:
+    # A failed run, or a run for anything but a push, releases nothing.
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      # Actions are pinned to commit SHAs (the comment names the release), the same one as in tests.yml.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }} # the commit the tests passed on, not wherever main is by now
+          fetch-depth: 0 # the whole history and every tag, to see which release tags exist
+          fetch-tags: true
+          persist-credentials: false # nothing here pushes; gh gets its token from GH_TOKEN
+      - name: Tag and release this commit if its version is new
+        env:
+          # Event data and the token reach the script only as environment variables, never as expressions in its text.
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          TAG="$(python3 tools/release_tag.py)"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "$TAG already exists; nothing to release."
+            exit 0
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "A release for $TAG already exists; nothing to release."
+            exit 0
+          fi
+          gh release create "$TAG" --target "$HEAD_SHA" --title "$TAG" --generate-notes
