@@ -3,6 +3,7 @@
 Runs the real bridge under Python against a stand-in `databricks` CLI and a stand-in Genie MCP server.
 """
 import importlib.util
+import io
 import json
 import os
 import queue
@@ -10,6 +11,7 @@ import signal
 import subprocess
 import threading
 import time
+import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -63,6 +65,7 @@ class FakeGenie:
     def __init__(self):
         self.requests = []
         self.reply = lambda request: (200, JSON, json.dumps({"jsonrpc": "2.0", "id": request["body"].get("id"), "result": {"ok": True}}))
+        self.trickle = None  # (method, seconds): send the reply to that method one byte at a time
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -77,7 +80,15 @@ class FakeGenie:
                 data = payload.encode()
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
-                self.wfile.write(data)
+                try:
+                    if fake.trickle and body.get("method") == fake.trickle[0]:
+                        for byte in data:
+                            self.wfile.write(bytes([byte]))
+                            time.sleep(fake.trickle[1])
+                    else:
+                        self.wfile.write(data)
+                except OSError:  # the bridge gave up and hung up
+                    pass
 
             def log_message(self, *args):
                 pass
@@ -180,6 +191,8 @@ class CliScript:
         self.path.chmod(0o755)
         self.log = folder / "cli-calls"
         self.store = folder / "cli-profiles"
+        self.tmp = folder / "tmp"  # the bridge's temp folder, where it records a sign-in in progress
+        self.tmp.mkdir()
         self.set_profiles({"DEMO": WORKSPACE, "DEFAULT": WORKSPACE})
 
     def set_profiles(self, profiles):
@@ -190,6 +203,9 @@ class CliScript:
             lines.append(f"{name} {host} {auth_type}\n")
         self.store.write_text("".join(lines))
 
+    def login_records(self):
+        return sorted(self.tmp.glob("databricks-genie-login-*.json"))
+
     def calls(self):
         return self.log.read_text().splitlines() if self.log.exists() else []
 
@@ -197,7 +213,8 @@ class CliScript:
         return [line for line in self.calls() if line.startswith("auth login")]
 
     def env(self):
-        return {"DATABRICKS_CLI": str(self.path), "FAKE_CLI_CALLS": str(self.log), "FAKE_PROFILES": str(self.store)}
+        return {"DATABRICKS_CLI": str(self.path), "FAKE_CLI_CALLS": str(self.log), "FAKE_PROFILES": str(self.store),
+                "TMPDIR": str(self.tmp)}
 
 
 @pytest.fixture
@@ -627,8 +644,8 @@ def test_genie_connection_says_to_offer_the_official_installer_when_the_cli_is_m
     assert genie.requests == []
 
 
-def test_a_cli_that_is_not_installed_anywhere_is_reported_as_missing(monkeypatch, tmp_path):
-    bridge = load_bridge()
+def test_a_cli_that_is_not_installed_anywhere_is_reported_as_missing(monkeypatch, tmp_path, loaded):
+    bridge = loaded
     monkeypatch.setattr(bridge, "cli_candidates", lambda env: [str(tmp_path / "databricks")])
     context = bridge.new_context({"DATABRICKS_CONFIG_PROFILE": "NEW"})
 
@@ -935,6 +952,14 @@ def load_bridge():
     return module
 
 
+@pytest.fixture
+def loaded(monkeypatch, tmp_path):
+    """The bridge loaded in this process, keeping any sign-in record in tmp_path instead of the real temp folder."""
+    bridge = load_bridge()
+    monkeypatch.setattr(bridge.tempfile, "tempdir", str(tmp_path))
+    return bridge
+
+
 class FakeCli:
     login_hint = "Run: databricks auth login --profile TEST"
     profile = "TEST"
@@ -973,14 +998,14 @@ class FakeClock:
         return self.now
 
 
-def test_unexpected_errors_never_repeat_their_text_which_could_quote_a_token(monkeypatch, capsys):
-    bridge = load_bridge()
+def test_unexpected_errors_never_repeat_their_text_which_could_quote_a_token(monkeypatch, capsys, loaded):
+    bridge = loaded
 
     def fail(message, context):
         raise ValueError("Invalid header value b'Bearer tok-secret'")
 
     monkeypatch.setattr(bridge, "call_upstream", fail)
-    context = bridge.new_context({"GENIE_MCP_URL": "http://example.invalid/x"})
+    context = bridge.new_context({"GENIE_MCP_URL": "http://example.invalid/x", "DATABRICKS_CONFIG_PROFILE": "TEST"})
     context["cli"] = FakeCli()
 
     bridge.handle(json.dumps(call("genie_poll_response", POLL)), context)
@@ -1026,12 +1051,12 @@ def slow_genie(monkeypatch, bridge, seconds_per_request):
     return timeouts
 
 
-def test_each_step_of_a_call_gets_only_the_time_left_before_the_call_limit(monkeypatch, capsys):
+def test_each_step_of_a_call_gets_only_the_time_left_before_the_call_limit(monkeypatch, capsys, loaded):
     """A first Genie call also opens the session (initialize, then notifications/initialized), and all three requests
     have to fit in one call's time limit."""
-    bridge = load_bridge()
+    bridge = loaded
     timeouts = slow_genie(monkeypatch, bridge, 50)
-    context = bridge.new_context({"GENIE_MCP_URL": "http://example.invalid/x"})
+    context = bridge.new_context({"GENIE_MCP_URL": "http://example.invalid/x", "DATABRICKS_CONFIG_PROFILE": "TEST"})
     context["cli"] = FakeCli()
 
     bridge.handle(json.dumps(call("genie_poll_response", POLL)), context)
@@ -1040,10 +1065,10 @@ def test_each_step_of_a_call_gets_only_the_time_left_before_the_call_limit(monke
     assert json.loads(capsys.readouterr().out) == {"jsonrpc": "2.0", "id": 3, "result": {}}
 
 
-def test_a_call_that_runs_out_of_time_says_so_instead_of_running_over(monkeypatch, capsys):
-    bridge = load_bridge()
+def test_a_call_that_runs_out_of_time_says_so_instead_of_running_over(monkeypatch, capsys, loaded):
+    bridge = loaded
     timeouts = slow_genie(monkeypatch, bridge, 80)
-    context = bridge.new_context({"GENIE_MCP_URL": "http://example.invalid/x"})
+    context = bridge.new_context({"GENIE_MCP_URL": "http://example.invalid/x", "DATABRICKS_CONFIG_PROFILE": "TEST"})
     context["cli"] = FakeCli()
 
     bridge.handle(json.dumps(call("genie_poll_response", POLL)), context)
@@ -1085,7 +1110,7 @@ def test_gives_subprocess_run_the_cli_timeout(monkeypatch):
     assert timeouts == [7]
 
 
-# Review fixes: profiles that sign in another way
+# Review fixes: profiles that sign in another way, sign-ins that outlive the bridge, and tool lists
 
 
 @pytest.mark.parametrize("auth_type", ["pat", "oauth-m2m", "azure-cli", ""])
@@ -1108,3 +1133,164 @@ def test_a_profile_that_signs_in_another_way_is_reported_and_never_touched(start
     assert ask["result"]["isError"] is True and "unsupported_auth" in text_of(ask)
     assert cli.logins() == [] and cli.store.read_text() == before
     assert genie.requests == []
+
+
+def test_a_restarted_bridge_still_sees_the_sign_in_in_progress_and_starts_no_second_one(start, cli):
+    # `agy -p` starts a new bridge for each turn, while the user may still be signing in from the last one.
+    cli.set_profiles({})
+    first = start(new_session=True, DATABRICKS_CONFIG_PROFILE="NEW", FAKE_LOGIN_SECONDS="3")
+    first.send(call("genie_setup", {"workspace_url": WORKSPACE}))
+    first.reply()
+    wait_for(lambda: cli.logins())
+    os.killpg(first.process.pid, signal.SIGTERM)  # the turn ends, and the sign-in carries on
+    first.process.wait(timeout=10)
+    second = start(DATABRICKS_CONFIG_PROFILE="NEW")
+    _, during = second.connection(3)
+    second.send(call("genie_setup", {"workspace_url": WORKSPACE}, number=4))
+    again = report_of(second.reply())
+    _, after = wait_for_sign_in_to_end(second)
+
+    assert during["status"] == "login_in_progress" and WORKSPACE in during["next_step"]
+    assert again["status"] == "login_in_progress"
+    assert len(cli.logins()) == 1
+    assert after["status"] == "ready"
+
+
+def test_a_restarted_bridge_reports_a_sign_in_that_ended_without_signing_in(start, cli):
+    cli.set_profiles({})
+    first = start(DATABRICKS_CONFIG_PROFILE="NEW", FAKE_LOGIN_FAIL="1")
+    first.send(call("genie_setup", {"workspace_url": WORKSPACE}))
+    first.reply()
+    wait_for_sign_in_to_end(first)
+    first.close()
+    second = start(DATABRICKS_CONFIG_PROFILE="NEW")
+    _, report = second.connection(3)
+
+    assert report["status"] == "login_failed" and WORKSPACE in report["next_step"]
+
+
+def test_the_sign_in_record_holds_no_token_and_is_removed_once_signed_in(start, cli):
+    cli.set_profiles({})
+    bridge = start(DATABRICKS_CONFIG_PROFILE="NEW", FAKE_LOGIN_SECONDS="1")
+    bridge.send(call("genie_setup", {"workspace_url": WORKSPACE}))
+    bridge.reply()
+    (record_file,) = cli.login_records()
+    record = json.loads(record_file.read_text())
+    mode = record_file.stat().st_mode & 0o777
+    _, report = wait_for_sign_in_to_end(bridge)
+
+    assert set(record) == {"pid", "profile", "host", "started"}
+    assert record["profile"] == "NEW" and record["host"] == WORKSPACE
+    assert mode == 0o600
+    assert report["status"] == "ready" and cli.login_records() == []
+
+
+def test_an_old_sign_in_record_is_not_taken_for_one_still_running(start, cli):
+    # Once a sign-in has ended, another process can get its process id.
+    cli.set_profiles({})
+    first = start(DATABRICKS_CONFIG_PROFILE="NEW", FAKE_LOGIN_FAIL="1")
+    first.send(call("genie_setup", {"workspace_url": WORKSPACE}))
+    first.reply()
+    wait_for_sign_in_to_end(first)
+    first.close()
+    (record_file,) = cli.login_records()
+    record = json.loads(record_file.read_text())
+    record_file.write_text(json.dumps({**record, "pid": os.getpid(), "started": time.time() - 3600}))
+    second = start(DATABRICKS_CONFIG_PROFILE="NEW")
+    _, report = second.connection(3)
+
+    assert report["status"] == "login_failed"
+
+
+@pytest.mark.parametrize("answer", ["error", "nothing"])
+def test_lists_the_bundled_tools_when_genie_answers_tools_list_with_an_error_or_nothing(start, genie, answer):
+    def reply(request):
+        body = request["body"]
+        if body.get("method") != "tools/list":
+            return 200, JSON, json.dumps({"jsonrpc": "2.0", "id": body.get("id"), "result": {}})
+        if answer == "nothing":
+            return 202, {}, ""
+        return 200, JSON, json.dumps({"jsonrpc": "2.0", "id": body["id"], "error": {"code": -32603, "message": "Internal error"}})
+
+    genie.reply = reply
+    bridge = start()
+    bridge.send(TOOLS_LIST)
+
+    assert [tool["name"] for tool in bridge.reply(timeout=5)["result"]["tools"]] == GENIE_TOOLS + BRIDGE_TOOLS
+
+
+# Review fixes: a wall-clock limit on the whole call, not just on each socket step
+
+
+def short_limit(bridge, monkeypatch, env, seconds):
+    """A context for the bridge loaded in this process, with a call limit of seconds and a CLI that answers at once."""
+    monkeypatch.setattr(bridge, "CALL_LIMIT_SECONDS", seconds)
+    context = bridge.new_context({"DATABRICKS_CONFIG_PROFILE": "TEST", **env})
+    context["cli"] = FakeCli()
+    return context
+
+
+def test_a_slowly_streamed_reply_cannot_run_past_the_call_limit(monkeypatch, capsys, loaded, genie):
+    # Each byte comes well within the socket timeout, so only a limit on the whole call stops this.
+    genie.trickle = ("tools/call", 0.1)
+    genie.reply = lambda request: (200, {"Content-Type": "text/event-stream"}, "data: " + json.dumps(
+        {"jsonrpc": "2.0", "id": request["body"].get("id"), "result": {}}) + "\n\n")
+    context = short_limit(loaded, monkeypatch, {"GENIE_MCP_URL": genie.url}, 2)
+    began = time.monotonic()
+    loaded.handle(json.dumps(call("genie_poll_response", POLL)), context)
+    took = time.monotonic() - began
+    reply = json.loads(capsys.readouterr().out)
+
+    assert took < 3
+    assert reply["result"]["isError"] is True and "ran out of time" in text_of(reply)
+
+
+def test_a_request_stuck_inside_urlopen_cannot_run_past_the_call_limit(monkeypatch, capsys, loaded):
+    # urlopen's timeout covers each socket step, not a DNS lookup or a connect that tries one address after another.
+    def stuck(request, timeout=None):
+        time.sleep(5)
+        return FakeResponse()
+
+    context = short_limit(loaded, monkeypatch, {"GENIE_MCP_URL": "http://example.invalid/x"}, 2)
+    monkeypatch.setattr(loaded.urllib.request, "urlopen", stuck)
+    began = time.monotonic()
+    loaded.handle(json.dumps(call("genie_poll_response", POLL)), context)
+    took = time.monotonic() - began
+
+    assert took < 3
+    assert "ran out of time" in text_of(json.loads(capsys.readouterr().out))
+
+
+def test_a_token_refresh_after_a_401_gets_only_the_time_left(monkeypatch, capsys, loaded):
+    bridge = loaded
+    clock = FakeClock()
+    cli_timeouts, url_timeouts = [], []
+    tokens = iter(["tok-1", "tok-2"])
+
+    def run(command, **options):
+        cli_timeouts.append(options["timeout"])
+        clock.now += 1
+        reply = {"access_token": next(tokens), "token_type": "Bearer", "expires_in": 3600}
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(reply), stderr="")
+
+    def urlopen(request, timeout=None):
+        url_timeouts.append(timeout)
+        if request.get_header("Authorization") == "Bearer tok-1":
+            clock.now += 140  # Genie takes its time, then rejects the token
+            raise urllib.error.HTTPError(request.full_url, 401, "Unauthorized", {}, io.BytesIO(b"expired"))
+        clock.now += 1
+        return FakeResponse()
+
+    monkeypatch.setattr(bridge, "time", clock)
+    monkeypatch.setattr(bridge.subprocess, "run", run)
+    monkeypatch.setattr(bridge.urllib.request, "urlopen", urlopen)
+    for name, value in (("CALL_LIMIT_SECONDS", 160), ("UPSTREAM_TIMEOUT_SECONDS", 150), ("CLI_TIMEOUT_SECONDS", 30)):
+        monkeypatch.setattr(bridge, name, value)
+    context = bridge.new_context({"GENIE_MCP_URL": "http://example.invalid/x", "DATABRICKS_CLI": "databricks",
+                                  "DATABRICKS_CONFIG_PROFILE": "TEST"})
+
+    bridge.handle(json.dumps(call("genie_poll_response", POLL)), context)
+
+    assert json.loads(capsys.readouterr().out) == {"jsonrpc": "2.0", "id": 3, "result": {}}
+    assert cli_timeouts == [30, 19]  # the refresh after the 401 gets the 19 s left, not the CLI's usual 30
+    assert url_timeouts == [150, 18, 17, 16]

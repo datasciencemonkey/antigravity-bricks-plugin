@@ -13,6 +13,8 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -149,6 +151,49 @@ class SessionExpired(BridgeError):
     pass
 
 
+class OutOfTime(BridgeError):
+    pass
+
+
+DEADLINE = None  # the time.monotonic() by which the message being handled must be answered; handle() sets it
+OUT_OF_TIME = ("This call ran out of time before Genie answered. Try again; to wait for an answer that's already "
+               "started, poll again with the same IDs.")
+
+
+def check_time():
+    """Raise OutOfTime once less than a second of this call's time limit is left."""
+    if DEADLINE is not None and DEADLINE - time.monotonic() < 1:
+        raise OutOfTime(OUT_OF_TIME)
+
+
+def time_left(cap):
+    """How long the next step may take: cap, or less when this call's time limit is closer."""
+    check_time()
+    return cap if DEADLINE is None else min(cap, DEADLINE - time.monotonic())
+
+
+def in_time(work, seconds):
+    """Run work() on a worker thread and wait at most seconds for it. Socket timeouts only bound each step, so without
+    this a slow DNS lookup, a connect that tries one address after another, or a reply that trickles in could outlast
+    the call."""
+    outcome = {}
+
+    def run():
+        try:
+            outcome["value"] = work()
+        except BaseException as error:  # handed back to the caller
+            outcome["error"] = error
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if worker.is_alive():
+        raise OutOfTime(OUT_OF_TIME)
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
+
+
 class DatabricksCli:
     """Everything the bridge needs from Databricks comes from one CLI profile: the workspace and fresh tokens."""
 
@@ -171,10 +216,11 @@ class DatabricksCli:
         try:
             # stdin is Antigravity's message stream, so the CLI must never read from it.
             result = subprocess.run([cli, *args, "--output", "json"], env=self.cli_env, stdin=subprocess.DEVNULL,
-                                    capture_output=True, text=True, timeout=CLI_TIMEOUT_SECONDS)
+                                    capture_output=True, text=True, timeout=time_left(CLI_TIMEOUT_SECONDS))
         except OSError:
             raise CliMissing("The Databricks CLI at {} couldn't be started. Call genie_connection for how to install it.".format(cli))
         except subprocess.TimeoutExpired:
+            check_time()
             raise BridgeError(failure)
         if result.returncode != 0:
             raise BridgeError(failure)
@@ -235,12 +281,94 @@ def new_context(env):
         "session_id": None,
         "session_started": False,
         "client_params": None,  # Antigravity's initialize, reused to open the session with Genie One
-        "login": None,  # the background `databricks auth login`, while one runs
-        "login_url": None,
-        "login_failed": False,
+        "login": None,  # the background `databricks auth login` this bridge started
+        "login_record": None,  # its record, also kept in the temp folder
         "ready": False,
         "announce_tools": False,  # tell Antigravity its tool list changed once Genie One's own list can be fetched
     }
+
+
+def login_file(profile):
+    """Where a background sign-in for profile is recorded: the OS temp folder, one file per user and profile."""
+    if not PROFILE_NAME.fullmatch(profile):
+        return None
+    owner = os.getuid() if hasattr(os, "getuid") else "user"
+    return os.path.join(tempfile.gettempdir(), "databricks-genie-login-{}-{}.json".format(owner, profile))
+
+
+def read_login_file(profile):
+    path = login_file(profile)
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as file:
+            if hasattr(os, "getuid") and os.fstat(file.fileno()).st_uid != os.getuid():
+                return None  # another user's file
+            record = json.load(file)
+    except (OSError, ValueError):
+        return None
+    valid = (isinstance(record, dict) and record.get("profile") == profile and isinstance(record.get("host"), str)
+             and isinstance(record.get("pid"), int) and isinstance(record.get("started"), (int, float)))
+    return record if valid else None
+
+
+def write_login_file(record):
+    """Save the sign-in's process id, profile, workspace and start time. There's never a token in it."""
+    path = login_file(record["profile"])
+    if not path:
+        return
+    try:
+        handle, temporary = tempfile.mkstemp(prefix=".databricks-genie-login-", dir=os.path.dirname(path))
+    except OSError:
+        return  # this bridge still has the record in memory
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as file:
+            json.dump(record, file)
+        os.replace(temporary, path)
+    except OSError:
+        try:
+            os.remove(temporary)
+        except OSError:
+            pass
+
+
+def login_record(context):
+    """The background sign-in for this profile that hasn't been cleared yet, if there is one."""
+    return read_login_file(context["cli"].profile) or context["login_record"]
+
+
+def process_running(pid):
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        return True  # os.kill would stop the process on Windows; the age limit in login_running covers it
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True  # it runs, as someone else
+    except OSError:
+        return False
+    return True
+
+
+def login_running(context, record):
+    process = context["login"]
+    if process is not None and process.pid == record["pid"]:
+        return process.poll() is None
+    # A process id can be reused once the sign-in ends, so a record older than the sign-in's own time limit has ended.
+    return time.time() - record["started"] < LOGIN_TIMEOUT_MINUTES * 60 + 60 and process_running(record["pid"])
+
+
+def clear_login(context):
+    if context["login"] is not None:
+        context["login"].poll()  # collect it if it has ended
+    context.update(login=None, login_record=None)
+    path = login_file(context["cli"].profile)
+    if path:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 def next_step(status, profile, host, url, profiles, auth_type=None):
@@ -295,33 +423,32 @@ def report(context, status, host=None, profiles=None, auth_type=None):
 
 
 def connection(context):
-    """Where the connection stands: checks the CLI profile, and notices when a sign-in has finished."""
+    """Where the connection stands: checks the CLI profile, and any background sign-in, even one an earlier bridge began."""
     cli = context["cli"]
-    login = context["login"]
-    if login is not None:
-        if login.poll() is None:
-            return report(context, "login_in_progress", context["login_url"])
-        context["login"] = None
-        context["login_failed"] = login.returncode != 0
-        if login.returncode == 0:
-            cli.invalidate()
-            context.update(ready=False, announce_tools=True)  # start again from the profile as the sign-in left it
+    login = login_record(context)
     try:
         cli.token()
+    except OutOfTime:
+        raise
     except CliMissing:
         context["ready"] = False
         return report(context, "cli_missing")
     except BridgeError:
         context["ready"] = False
+        if login is not None and login_running(context, login):
+            return report(context, "login_in_progress", login["host"])
         profiles = cli.profiles()
         own = next((item for item in profiles if item["name"] == cli.profile), None)
         if own is not None and own["auth_type"] != U2M:  # `auth token` is U2M-only, so it always fails for these
             return report(context, "unsupported_auth", own["host"], auth_type=own["auth_type"])
-        if context["login_failed"]:
-            return report(context, "login_failed", context["login_url"])
+        if login is not None:
+            return report(context, "login_failed", login["host"])
         if own is None:
             return report(context, "not_configured", profiles=profiles)
         return report(context, "login_needed", own["host"])
+    if login is not None:  # the sign-in worked: start again from the profile as it left it
+        clear_login(context)
+        context.update(ready=False, announce_tools=True)
     if not context["ready"]:  # it just turned ready: a fresh URL and Genie session
         url = context["override"]
         if not url:
@@ -330,7 +457,7 @@ def connection(context):
                 raise BridgeError("CLI profile {0} has no workspace URL. Ask the user to fix it in a terminal: "
                                   "databricks auth login --profile {0}".format(cli.profile))
             url = genie_url(own["host"])
-        context.update(url=url, session_id=None, session_started=False, ready=True, login_failed=False)
+        context.update(url=url, session_id=None, session_started=False, ready=True)
         if context["announce_tools"]:
             context["announce_tools"] = False
             write({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
@@ -363,7 +490,10 @@ def setup(arguments, context):
         raise BridgeError(
             "The CLI profile name {!r} can only use letters, digits, '.', '_' and '-', up to 64 of them. Ask the user to "
             "set DATABRICKS_CONFIG_PROFILE to a simpler name and restart Antigravity.".format(cli.profile))
-    context.update(login=cli.login(url), login_url=url, login_failed=False)
+    process = cli.login(url)
+    record = {"pid": process.pid, "profile": cli.profile, "host": url, "started": time.time()}
+    context.update(login=process, login_record=record)
+    write_login_file(record)
     return report(context, "login_in_progress", url)
 
 
@@ -385,16 +515,13 @@ def parse_event_stream(text):
     return messages
 
 
-def time_left(context, cap):
-    """How long the next request may take: cap, or less when this call's time limit is closer."""
-    deadline = context.get("deadline")
-    if deadline is None:
-        return cap
-    left = deadline - time.monotonic()
-    if left < 1:
-        raise BridgeError("This call ran out of time before Genie answered. Try again; to wait for an answer that's "
-                          "already started, poll again with the same IDs.")
-    return min(cap, left)
+def exchange(request, timeout):
+    """One HTTP round trip to Genie One: its status, headers and body."""
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status, response.headers, response.read().decode()
+    except urllib.error.HTTPError as error:
+        return error.code, error.headers, error.read().decode(errors="replace")
 
 
 def forward(message, context):
@@ -410,15 +537,12 @@ def forward(message, context):
             headers["Mcp-Session-Id"] = session
         request = urllib.request.Request(context["url"], data=json.dumps(message).encode(), headers=headers, method="POST")
         host = display_host(context["url"])
-        timeout = time_left(context, UPSTREAM_TIMEOUT_SECONDS)
+        timeout = time_left(UPSTREAM_TIMEOUT_SECONDS)
         late = ("Genie didn't answer within {} seconds. If you were waiting for an answer, poll again with the same IDs "
                 "instead of asking again.".format(int(timeout)))
         unreachable = "Couldn't reach Genie at {}: {}. Check the network connection, and connect to the VPN if the workspace needs one."
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                status, response_headers, text = response.status, response.headers, response.read().decode()
-        except urllib.error.HTTPError as error:
-            status, response_headers, text = error.code, error.headers, error.read().decode(errors="replace")
+            status, response_headers, text = in_time(lambda: exchange(request, timeout), timeout)
         except urllib.error.URLError as error:
             raise BridgeError(late if isinstance(error.reason, socket.timeout) else unreachable.format(host, error.reason))
         except socket.timeout:
@@ -516,9 +640,10 @@ def list_tools(message, context):
         if connection(context)["status"] == "ready":
             replies = call_upstream(message, context)
             result = matching_result(replies, message)
-            if result is not None:
-                result["tools"] = list(result.get("tools") or []) + BRIDGE_TOOLS
-            return replies
+            if result is not None and isinstance(result.get("tools"), list):
+                result["tools"] = result["tools"] + BRIDGE_TOOLS
+                return replies
+            sys.stderr.write("Genie One answered tools/list with an error or nothing, so the bundled list stands in.\n")
     except BridgeError as error:  # the tools still show up, and calling one says what's wrong
         sys.stderr.write("Listing Genie One's tools failed, so the bundled list stands in: {}\n".format(error))
     context["announce_tools"] = True
@@ -572,11 +697,12 @@ def write(message):
 
 
 def handle(line, context):
+    global DEADLINE
     try:
         message = json.loads(line)
     except ValueError:
         return write({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}})
-    context["deadline"] = time.monotonic() + CALL_LIMIT_SECONDS
+    DEADLINE = time.monotonic() + CALL_LIMIT_SECONDS
     try:
         for reply in dispatch(message, context):
             write(reply)

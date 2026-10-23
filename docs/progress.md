@@ -16,6 +16,9 @@ As of 2026-10-23. Finished items are crossed out; issue numbers refer to the [pr
 - Hardening in the bridge (#33): clear errors for a missing CLI, a cancelled or failed sign-in, HTTP 403 (an IP access list or VPN), HTTP 404 (Genie One not available) and an unreachable workspace; every call ends within 160 s; a new Genie session when Genie ends the old one; no error text that could quote a token.
 - Review fixes (#33):
   - A profile that signs in another way (a personal access token or a service principal) is reported as `unsupported_auth`, and `genie_setup` never signs it in again, which would drop its token or secret.
+  - Every call has a wall-clock limit, including a reply that trickles in, a slow connect, and a token refresh after a 401.
+  - A background sign-in is recorded in the OS temp folder (process id, profile, workspace and start time; no token), so the bridge that `agy -p` starts for the next turn still sees it.
+  - The bundled tool list stands in when Genie One answers `tools/list` with an error or nothing.
 - ~~Finds the Databricks CLI even when Antigravity starts the bridge with a bare PATH (#21)~~
 - ~~An `antigravity-databricks-genie` skill (renamed from `genie` on 2026-10-22, #26): ask, wait for the answer, fetch full results, follow up in the same conversation, put Genie's SQL into code, and fall back to the CLI (#11)~~
 - ~~The bridge waits up to 150 s for Genie, so it gives up before Antigravity's 3-minute limit on each tool call, and the skill says to poll again with the same IDs (#26, #28). The wait was 120 s, which timed out a slow poll, then 300 s, which outlasted Antigravity's limit.~~
