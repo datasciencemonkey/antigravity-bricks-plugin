@@ -59,13 +59,24 @@ def manifest():
     return json.loads((PLUGIN / "plugin.json").read_text())
 
 
-def tool_names_the_headless_rules_must_allow():
-    """Genie One's four tools plus the bridge's own, except genie_setup (it opens a browser and writes the CLI config)."""
-    genie_one = [tool["name"] for tool in json.loads((PLUGIN / "scripts" / "genie_tools.json").read_text())]
+def troubleshooting_bullet(path, label):
+    """The one Troubleshooting bullet of a README that starts with the bold label, label included."""
+    found = re.findall(rf"^- \*\*{re.escape(label)}.*$", section(path, "Troubleshooting"), re.MULTILINE)
+    assert len(found) == 1, f"{path.name}: {len(found)} Troubleshooting bullets start with {label!r}"
+    return found[0]
+
+
+def load_bridge():
     spec = importlib.util.spec_from_file_location("genie_bridge", PLUGIN / "scripts" / "genie_bridge.py")
     bridge = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(bridge)
-    return (set(genie_one) | {tool["name"] for tool in bridge.BRIDGE_TOOLS}) - {HEADLESS_TOOL_NOT_ALLOWED}
+    return bridge
+
+
+def tool_names_the_headless_rules_must_allow():
+    """Genie One's four tools plus the bridge's own, except genie_setup (it opens a browser and writes the CLI config)."""
+    genie_one = [tool["name"] for tool in json.loads((PLUGIN / "scripts" / "genie_tools.json").read_text())]
+    return (set(genie_one) | {tool["name"] for tool in load_bridge().BRIDGE_TOOLS}) - {HEADLESS_TOOL_NOT_ALLOWED}
 
 
 def test_the_readme_opens_with_the_plugins_name_and_says_what_it_does():
@@ -97,6 +108,15 @@ def test_the_readme_says_how_to_check_update_and_remove_the_plugin():
 
     for command in ("agy plugin list", "agy plugin uninstall databricks-genie"):
         assert command in install
+
+
+def test_updating_means_running_the_same_install_command_again_because_agy_has_no_update_command():
+    install = section(README, "Install")
+
+    assert f"To update, run the same `{INSTALL_PLUGIN}` command again, then restart Antigravity." in install
+    assert "There is no `agy plugin update`" in install
+    assert "turned on or off carries over" in install  # a reinstall keeps the plugin enabled or disabled as it was
+    assert "run the install command again and restart the app" not in install  # the vaguer wording it replaces
 
 
 def test_first_use_walks_through_the_databricks_cli_profile_check_and_the_sign_in():
@@ -149,7 +169,19 @@ def test_the_security_section_says_how_sign_in_works_and_what_is_stored():
     security = section(README, "Security")
 
     for fact in ("OAuth U2M", "store no secrets", "never printed", "your permissions", "OAuth M2M", "unsupported_auth",
-                 "/issues/39"):
+                 "profile_exists_unreadable", "/issues/39"):
+        assert fact in security, fact
+
+
+def test_security_says_which_file_the_plugin_writes_and_that_it_never_holds_a_token(tmp_path, monkeypatch):
+    security = section(README, "Security")
+    monkeypatch.setenv("HOME", str(tmp_path))  # the bridge keeps its sign-in record under the home folder
+    record = Path(load_bridge().login_file("DEFAULT", create=True))
+    folder = f"~/{record.parent.relative_to(tmp_path).as_posix()}/"
+
+    assert folder == "~/.cache/antigravity-databricks-genie/"  # the folder the README names is the one the bridge uses
+    assert folder in security
+    for fact in ("only file the plugin itself writes", "process id", "never a token", "only you can use"):
         assert fact in security, fact
 
 
@@ -158,6 +190,26 @@ def test_troubleshooting_covers_403_unsupported_auth_timeouts_and_polling_again(
 
     for fact in ("403", "VPN", "IP access list", "unsupported_auth", "timed out", "poll", "same"):
         assert fact in troubleshooting, fact
+
+
+@pytest.mark.parametrize("label", ["`profile_exists_unreadable`:", '"Genie returned a non-JSON page":'])
+def test_troubleshooting_explains_the_follow_up_failures_in_the_same_words_as_the_plugins_readme(label):
+    assert troubleshooting_bullet(README, label) == troubleshooting_bullet(PLUGIN_README, label)
+
+
+def test_a_question_that_times_out_is_explained_as_in_the_plugins_readme_with_the_duplicate_warning():
+    label = "A question times out:"
+    root = troubleshooting_bullet(README, label)
+    plugin_words = troubleshooting_bullet(PLUGIN_README, label).split(":**", 1)[1].strip()
+
+    assert plugin_words in root
+    assert "3 minutes" in root and "150 seconds" in root
+    assert "starts a duplicate question" in root
+
+
+def test_the_older_entry_that_said_to_ask_the_agent_to_check_again_is_merged_into_the_one_above():
+    # It told readers to poll with the same IDs, which a question that timed out never got.
+    assert "**A call timed out:**" not in section(README, "Troubleshooting")
 
 
 def test_development_points_at_the_test_command_and_agents_md():

@@ -39,7 +39,9 @@ The plugin is in [`plugins/databricks-genie/`](plugins/databricks-genie): a smal
 
 3. Restart the Antigravity desktop app. The `agy` CLI picks the plugin up on its next run.
 
-There's nothing to configure. Check that it's installed with `agy plugin list`. To update, run the install command again and restart the app. To remove it, run `agy plugin uninstall databricks-genie`.
+There's nothing to configure. Check that it's installed with `agy plugin list`.
+
+To update, run the same `agy plugin install https://github.com/datasciencemonkey/antigravity-bricks-plugin` command again, then restart Antigravity. There is no `agy plugin update`: reinstalling replaces the plugin's files exactly, and whether the plugin is turned on or off carries over. To remove it, run `agy plugin uninstall databricks-genie`.
 
 ## First use
 
@@ -107,18 +109,21 @@ Leave `genie_setup` out. It sets up a Databricks CLI profile and opens a browser
 
 ## Security
 
-- **Sign-in:** today the plugin signs in with your own Databricks CLI OAuth U2M login, so Genie runs under your permissions and sees only what you can see. Service principal sign-in (OAuth M2M) is planned as an opt-in path ([#39](https://github.com/datasciencemonkey/antigravity-bricks-plugin/issues/39)). A Databricks CLI profile that signs in any other way gets a clear `unsupported_auth` message and is never changed.
+- **Sign-in:** today the plugin signs in with your own Databricks CLI OAuth U2M login, so Genie runs under your permissions and sees only what you can see. Service principal sign-in (OAuth M2M) is planned as an opt-in path ([#39](https://github.com/datasciencemonkey/antigravity-bricks-plugin/issues/39)). A Databricks CLI profile that signs in any other way gets a clear `unsupported_auth` message, and one that the CLI doesn't list gets `profile_exists_unreadable`; the plugin never changes either.
 - **No secrets stored:** Antigravity and the plugin store no secrets. There is nothing to fill in, no token in Antigravity's settings, and no password or key in the plugin. The Databricks CLI keeps your sign-in in its own local cache and hands out short-lived tokens (about an hour).
 - **Tokens are never printed,** logged or written to disk by the plugin, and the agent is told never to show one.
+- **One small file:** the only file the plugin itself writes is a short record of a sign-in it started: a process id, the profile, the workspace and the start time, never a token. It's in `~/.cache/antigravity-databricks-genie/`, a folder only you can use, so the next headless `agy -p` run can see that sign-in.
 - **Where your data goes:** questions go from your computer to Genie in your own Databricks workspace, and the plugin has no server of its own. Genie's answers come back into your Antigravity conversation, so treat them like anything else you share with Antigravity.
 
 ## Troubleshooting
 
 - **Sign-in errors:** ask the agent to check the Genie connection, and it signs you in again if needed. Or run `databricks auth login --profile <name>` yourself.
 - **`unsupported_auth`:** your Databricks CLI profile signs in with a personal access token or a service principal. Genie here signs in with OAuth U2M, so the agent won't use or change that profile. Set `DATABRICKS_CONFIG_PROFILE` to a new profile name and restart Antigravity, and the agent sets that one up.
+- **`profile_exists_unreadable`:** the same applies to a profile that `databricks auth profiles` doesn't list because its section has no host, such as an Azure service principal. The agent finds its name in the Databricks config file (`~/.databrickscfg`, or the file `DATABRICKS_CONFIG_FILE` names), reading only section names, and never signs in over it. Use a new profile name, as above.
 - **HTTP 403:** the workspace may accept connections only from certain networks (an IP access list). Connect to the VPN if it needs one, and try again.
 - **HTTP 404:** Genie One isn't available in that workspace. A workspace admin may need to turn on partner-powered AI features.
-- **A call timed out:** Antigravity ends every tool call after 3 minutes, so the plugin stops waiting on Genie after 150 seconds. The question usually keeps running in Genie. Ask the agent to check again: it polls with the same conversation and response IDs instead of asking the question a second time.
+- **"Genie returned a non-JSON page":** a proxy or a single sign-on page answered instead of Genie. Check the VPN, the proxy and your sign-in, and try again.
+- **A question times out:** Antigravity ends every tool call after 3 minutes, so the plugin stops waiting on Genie after 150 seconds. Genie keeps working on it after the bridge gives up. If the timeout came while the agent was waiting for an answer, it polls again with the same IDs. If the question itself timed out, its IDs never came back, and asking again starts a duplicate question, so the agent waits a minute or two first.
 - **The Genie tools don't show up:** check that `python3 --version` works in a terminal, then restart Antigravity.
 - **The Databricks CLI isn't found:** the plugin looks on your PATH and in the usual install folders (`/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`).
 - **The install fails:** `agy plugin install` needs `git` and a network connection, because it clones this repository.
