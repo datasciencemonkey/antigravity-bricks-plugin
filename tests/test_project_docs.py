@@ -262,7 +262,7 @@ def test_the_cli_owns_its_environment_decision_is_recorded_with_its_price_and_it
     for fact in ("(the user, 2026-10-23)", "the bridge leaves the CLI's environment alone",
                  "the CLI owns its config and environment variables", "get the bridge's environment unchanged, as in the "
                  "user's terminal", "`DATABRICKS_AUTH_STORAGE`", "`DATABRICKS_OAUTH_CALLBACK_PORT`",
-                 "reads only `DATABRICKS_CONFIG_PROFILE`", "`DATABRICKS_CONFIG_FILE`", "`DATABRICKS_CLI`",
+                 "reads only `DATABRICKS_CONFIG_PROFILE`", "`DATABRICKS_CONFIG_FILE`", "`GENIE_BRIDGE_DATABRICKS_CLI`",
                  "it never reads `DATABRICKS_HOST`", "comes only from the CLI's profile listing",
                  "an exported `DATABRICKS_HOST` or `DATABRICKS_TOKEN` for another workspace can make the CLI report a sign-in "
                  "error", "unset them", "`GENIE_MCP_URL`", "only for a loopback URL",

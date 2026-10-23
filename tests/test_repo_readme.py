@@ -311,8 +311,11 @@ def test_first_use_says_a_machine_with_no_config_file_can_set_up(path):
 
 
 @pytest.mark.parametrize("path", DOCUMENTS)
-def test_the_user_docs_leave_out_the_genie_mcp_url_test_hook(path):
-    assert "GENIE_MCP_URL" not in read(path)
+def test_the_user_docs_leave_out_the_bridges_test_hooks(path):
+    text = read(path)
+
+    assert "GENIE_MCP_URL" not in text and "GENIE_BRIDGE_DATABRICKS_CLI" not in text
+    assert not re.search(r"(?<![A-Z0-9_])DATABRICKS_CLI(?![A-Z0-9_])", text)  # the name the CLI's path hook had before
 
 
 @pytest.mark.parametrize("path", DOCUMENTS)

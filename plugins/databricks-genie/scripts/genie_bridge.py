@@ -240,7 +240,9 @@ class DatabricksCli:
         self.cached = None  # (token, time to refresh it)
 
     def path(self):
-        cli = self.env.get("DATABRICKS_CLI") or next((path for path in cli_candidates(self.env) if os.path.exists(path)), None)
+        # GENIE_BRIDGE_DATABRICKS_CLI is the tests' way to name the CLI; the Databricks namespace stays the CLI's own.
+        cli = self.env.get("GENIE_BRIDGE_DATABRICKS_CLI") or next(
+            (path for path in cli_candidates(self.env) if os.path.exists(path)), None)
         if not cli:
             raise CliMissing("The Databricks CLI wasn't found. Call genie_connection for how to install it.")
         return cli

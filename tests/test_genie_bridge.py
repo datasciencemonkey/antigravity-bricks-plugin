@@ -279,7 +279,7 @@ class CliScript:
         return [line for line in self.calls() if line.startswith("auth login")]
 
     def env(self):
-        return {"DATABRICKS_CLI": str(self.path), "FAKE_CLI_CALLS": str(self.log),
+        return {"GENIE_BRIDGE_DATABRICKS_CLI": str(self.path), "FAKE_CLI_CALLS": str(self.log),
                 "DATABRICKS_CONFIG_FILE": str(self.config), "HOME": str(self.home), "TMPDIR": str(self.tmp)}
 
 
@@ -714,7 +714,8 @@ def test_a_genie_mcp_url_that_is_ignored_is_said_so_on_stderr_without_repeating_
 
 def test_the_databricks_cli_gets_the_bridges_environment_unchanged(start, cli):
     # The CLI owns its config and its environment variables, where it keeps its U2M tokens (DATABRICKS_AUTH_STORAGE) among them,
-    # so it gets them as a terminal would give them. DATABRICKS_CLI is how the tests point the bridge at the stand-in.
+    # so it gets them as a terminal would give them. (GENIE_BRIDGE_DATABRICKS_CLI, which points the bridge at the stand-in, gets there
+    # too, and the stand-in doesn't list it: it isn't in the Databricks namespace.)
     exported = {"DATABRICKS_AUTH_STORAGE": "plaintext", "DATABRICKS_OAUTH_CALLBACK_PORT": "8020", "DATABRICKS_SOMETHING": "else",
                 "DATABRICKS_HOST": "https://unused.example.test", "DATABRICKS_TOKEN": "made-up"}
     cli.set_profiles({})  # so that auth profiles, auth token and auth login all run
@@ -726,12 +727,12 @@ def test_the_databricks_cli_gets_the_bridges_environment_unchanged(start, cli):
     wait_for(lambda: cli.logins())
 
     assert {line.split()[1] for line in cli.calls()} == {"profiles", "token", "login"}
-    assert cli.variables() == {"DATABRICKS_CLI", "DATABRICKS_CONFIG_FILE", "DATABRICKS_CONFIG_PROFILE", *exported}
+    assert cli.variables() == {"DATABRICKS_CONFIG_FILE", "DATABRICKS_CONFIG_PROFILE", *exported}
 
 
 def test_the_cli_is_started_with_the_environment_itself_for_a_token_and_for_a_sign_in(monkeypatch):
     bridge = load_bridge()
-    env = {"PATH": "/usr/bin", "DATABRICKS_CLI": "databricks", "DATABRICKS_AUTH_STORAGE": "plaintext",
+    env = {"PATH": "/usr/bin", "GENIE_BRIDGE_DATABRICKS_CLI": "databricks", "DATABRICKS_AUTH_STORAGE": "plaintext",
            "DATABRICKS_HOST": "https://unused.example.test", "DATABRICKS_TOKEN": "made-up"}
     seen = []
 
@@ -751,11 +752,22 @@ def test_the_cli_is_started_with_the_environment_itself_for_a_token_and_for_a_si
     assert seen == [env, env]  # not a copy with anything taken out
 
 
-def test_the_bridge_reads_no_databricks_variable_but_the_profile_the_config_file_and_the_path_of_the_cli():
-    # The workspace comes from the CLI's profile listing alone, and the CLI's other variables are the CLI's business.
-    names = set(re.findall(r"DATABRICKS_[A-Z0-9_]+", BRIDGE.read_text()))
+def test_the_bridge_reads_no_databricks_variable_but_the_profile_and_the_config_file():
+    # The workspace comes from the CLI's profile listing alone, and the CLI's other variables are the CLI's business. The
+    # bridge's own hooks for the tests have names of their own, so the Databricks namespace stays the CLI's.
+    names = set(re.findall(r"(?<![A-Z0-9_])DATABRICKS_[A-Z0-9_]+", BRIDGE.read_text()))
 
-    assert names == {"DATABRICKS_CONFIG_PROFILE", "DATABRICKS_CONFIG_FILE", "DATABRICKS_CLI"}
+    assert names == {"DATABRICKS_CONFIG_PROFILE", "DATABRICKS_CONFIG_FILE"}
+
+
+def test_the_cli_is_found_through_the_bridges_own_hook_and_not_through_a_variable_in_the_databricks_namespace(monkeypatch):
+    bridge = load_bridge()
+    hook = bridge.DatabricksCli({"GENIE_BRIDGE_DATABRICKS_CLI": "/some/databricks", "DATABRICKS_CLI": "/not/this"})
+    assert hook.path() == "/some/databricks"
+
+    monkeypatch.setattr(bridge, "cli_candidates", lambda env: [])  # and no CLI to be found anywhere else
+    with pytest.raises(bridge.CliMissing):
+        bridge.DatabricksCli({"DATABRICKS_CLI": "/not/this"}).path()
 
 
 def test_genie_connection_lists_the_cli_profiles_when_its_own_is_not_set_up(start, genie, cli):
@@ -793,7 +805,7 @@ def test_genie_connection_reports_an_expired_sign_in_and_says_to_sign_in_again(s
 
 
 def test_genie_connection_says_to_offer_the_official_installer_when_the_cli_is_missing(start, genie, tmp_path):
-    bridge = start(DATABRICKS_CLI=str(tmp_path / "no-such-databricks"))
+    bridge = start(GENIE_BRIDGE_DATABRICKS_CLI=str(tmp_path / "no-such-databricks"))
     _, report = bridge.connection(3)
     bridge.send(call("genie_ask", {"question": "Revenue last quarter?"}, number=4))
     ask = bridge.reply()
@@ -1281,7 +1293,7 @@ def test_gives_subprocess_run_the_cli_timeout(monkeypatch):
     monkeypatch.setattr(bridge.subprocess, "run", fake_run)
     monkeypatch.setattr(bridge, "CLI_TIMEOUT_SECONDS", 7)  # not the real value, so a hard-coded number would fail
 
-    bridge.DatabricksCli({"DATABRICKS_CLI": "databricks"}).run(["auth", "token"], "Couldn't get a Databricks token from the CLI.")
+    bridge.DatabricksCli({"GENIE_BRIDGE_DATABRICKS_CLI": "databricks"}).run(["auth", "token"], "Couldn't get a Databricks token from the CLI.")
 
     assert timeouts == [7]
 
@@ -1490,7 +1502,7 @@ def test_a_token_refresh_after_a_401_gets_only_the_time_left(monkeypatch, capsys
     monkeypatch.setattr(bridge.urllib.request, "urlopen", urlopen)
     for name, value in (("CALL_LIMIT_SECONDS", 160), ("UPSTREAM_TIMEOUT_SECONDS", 150), ("CLI_TIMEOUT_SECONDS", 30)):
         monkeypatch.setattr(bridge, name, value)
-    context = bridge.new_context({"GENIE_MCP_URL": LOOPBACK, "DATABRICKS_CLI": "databricks",
+    context = bridge.new_context({"GENIE_MCP_URL": LOOPBACK, "GENIE_BRIDGE_DATABRICKS_CLI": "databricks",
                                   "DATABRICKS_CONFIG_PROFILE": "TEST"})
 
     bridge.handle(json.dumps(call("genie_poll_response", POLL)), context)
@@ -1653,7 +1665,7 @@ def test_a_profile_holds_settings_when_the_config_file_has_a_key_under_its_name(
 def test_genie_connection_reads_what_the_cli_writes_and_hides(start, cli, any_cli, config, profile, status):
     # Run on the stand-in and on the real CLI. Only a hidden section with keys in it has anything for a sign-in to lose.
     cli.set_config(config)
-    bridge = start(DATABRICKS_CLI=any_cli, DATABRICKS_CONFIG_PROFILE=profile)
+    bridge = start(GENIE_BRIDGE_DATABRICKS_CLI=any_cli, DATABRICKS_CONFIG_PROFILE=profile)
     _, report = bridge.connection(3)
 
     assert report["status"] == status
@@ -2011,7 +2023,7 @@ def test_a_machine_with_no_config_file_at_all_is_not_configured_and_can_be_set_u
 @needs_the_real_cli
 def test_with_the_real_cli_a_machine_with_no_config_file_is_not_configured(start, cli):
     cli.config.unlink()
-    bridge = start(DATABRICKS_CLI=REAL_CLI, DATABRICKS_CONFIG_PROFILE="NEW")
+    bridge = start(GENIE_BRIDGE_DATABRICKS_CLI=REAL_CLI, DATABRICKS_CONFIG_PROFILE="NEW")
     bridge.send(call("genie_connection"))
     reply = bridge.reply(timeout=60)
 
@@ -2036,7 +2048,7 @@ def test_the_profiles_the_cli_lists_are_found_even_where_the_bridge_guesses_the_
 
 def test_a_missing_config_file_does_not_hide_a_cli_that_is_missing_too(tmp_path):
     bridge = load_bridge()
-    cli = bridge.DatabricksCli({"DATABRICKS_CLI": str(tmp_path / "no-such-databricks"),
+    cli = bridge.DatabricksCli({"GENIE_BRIDGE_DATABRICKS_CLI": str(tmp_path / "no-such-databricks"),
                                 "DATABRICKS_CONFIG_FILE": str(tmp_path / "no-such-config")})
 
     with pytest.raises(bridge.CliMissing):
@@ -2046,7 +2058,7 @@ def test_a_missing_config_file_does_not_hide_a_cli_that_is_missing_too(tmp_path)
 def test_a_missing_config_file_does_not_hide_a_call_that_has_run_out_of_time(monkeypatch, tmp_path):
     bridge = load_bridge()
     monkeypatch.setattr(bridge, "DEADLINE", bridge.time.monotonic() - 5)
-    cli = bridge.DatabricksCli({"DATABRICKS_CLI": "databricks", "DATABRICKS_CONFIG_FILE": str(tmp_path / "no-such-config")})
+    cli = bridge.DatabricksCli({"GENIE_BRIDGE_DATABRICKS_CLI": "databricks", "DATABRICKS_CONFIG_FILE": str(tmp_path / "no-such-config")})
 
     with pytest.raises(bridge.OutOfTime):
         cli.profiles()
