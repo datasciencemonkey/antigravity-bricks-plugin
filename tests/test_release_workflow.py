@@ -175,14 +175,20 @@ def test_makes_the_tag_at_the_tested_commit_through_the_api_and_then_releases_th
     assert commands.index("tools/release_notes.py") < commands.index(make_tag) < commands.index("gh release create")
 
 
-def test_a_release_that_cannot_be_made_takes_back_the_tag_that_this_run_made():
+def test_a_release_that_cannot_be_made_takes_back_the_tag_only_when_gh_confirms_there_is_no_release():
     script = release_step(release_workflow())["run"]
     create = script.index("if ! gh release create")
 
     after = script[create:]
-    assert 'gh api -X DELETE "repos/$GH_REPO/git/refs/tags/$TAG"' in after and after.rstrip().endswith("fi")
-    assert "exit 1" in after
-    assert 'gh api -X DELETE' not in script[:create]  # only after this run made the tag, never before
+    view = after.index("gh release view")
+    delete = after.index('gh api -X DELETE "repos/$GH_REPO/git/refs/tags/$TAG"')
+    assert view < delete  # the tag is taken back only after asking whether the release exists ...
+    assert '*"release not found"*' in after[view:delete]  # ... and only when gh says that it does not
+    assert not re.search(r"\|\|\s*true", script)  # a failed delete is not hidden
+    assert "::error::" in after[delete:]  # it is reported
+    ending = [line.strip() for line in after.rstrip().splitlines()[-2:]]
+    assert ending == ["exit 1", "fi"] and after.count("exit") == 1  # whatever happened, the step fails
+    assert "gh api -X DELETE" not in script[:create]  # only after this run made the tag, never before
 
 
 def test_the_notes_are_built_by_release_notes_py_and_reach_gh_only_as_a_file():
@@ -265,6 +271,8 @@ notes = None
 if "--notes-file" in args:  # the real gh reads the file when it is called, so the stand-in does too
     with open(args[args.index("--notes-file") + 1]) as handle:
         notes = handle.read()
+with open(env("FAKE_GH_LOG")) as log:
+    earlier = [json.loads(line)["args"] for line in log]  # the calls made before this one
 with open(env("FAKE_GH_LOG"), "a") as log:
     log.write(json.dumps({"args": args, "notes": notes}) + "\\n")
 
@@ -275,6 +283,11 @@ def fail(message):
 
 
 if args[:2] == ["release", "view"]:
+    made = any(call[:2] == ["release", "create"] for call in earlier)
+    if made and env("FAKE_GH_VIEW_AFTER_CREATE") == "exists":  # create reported a failure after GitHub made the release
+        sys.exit(0)
+    if made and env("FAKE_GH_VIEW_AFTER_CREATE_ERROR"):  # and now the API is failing
+        fail(env("FAKE_GH_VIEW_AFTER_CREATE_ERROR"))
     if env("FAKE_GH_VIEW_ERROR"):  # the API is down, or the token can't read releases
         fail(env("FAKE_GH_VIEW_ERROR"))
     if env("FAKE_GH_RELEASE_EXISTS") != "1":
@@ -289,6 +302,8 @@ elif args[:1] == ["api"]:
             fail("gh: Reference already exists (HTTP 422)")
         print("{}")
     elif "DELETE" in args:  # taking a tag away
+        if env("FAKE_GH_DELETE_FAILS") == "1":
+            fail("gh: Server Error (HTTP 500)")
         print("{}")
     else:  # listing the pull requests
         sys.stdout.write(env("FAKE_GH_PULLS", "[]"))
@@ -679,6 +694,42 @@ def test_a_release_that_cannot_be_made_does_not_leave_its_tag_behind(checkout_di
     version = json.loads((REPO_ROOT / MANIFEST).read_text())["version"]
     assert result.returncode != 0
     assert checkout_dir.tag_deletions() == [["api", "-X", "DELETE", f"repos/owner/repo/git/refs/tags/v{version}"]]
+    calls = checkout_dir.gh_calls()
+    after_create = calls[calls.index(checkout_dir.creates()[0]):]
+    assert [call[:2] for call in after_create] == [["release", "create"], ["release", "view"], ["api", "-X"]]  # asked first
+    assert "::error::" not in result.stdout  # the tag was taken back, so there is nothing more to report
+
+
+def test_a_release_that_exists_though_gh_reported_a_failure_keeps_its_tag(checkout_dir):
+    # A lost response or a 502 can come after GitHub made the release. Taking its tag away would turn the live release
+    # into a draft, which the next run's gh release view would find and count as released for good.
+    result = checkout_dir.run(fake={"FAKE_GH_CREATE_FAILS": "1", "FAKE_GH_VIEW_AFTER_CREATE": "exists"})
+
+    version = json.loads((REPO_ROOT / MANIFEST).read_text())["version"]
+    assert result.returncode != 0
+    assert checkout_dir.tag_deletions() == []
+    (error,) = [line for line in result.stdout.splitlines() if line.startswith("::error::")]
+    assert f"v{version}" in error and "exists" in error
+
+
+@pytest.mark.parametrize("message", ["HTTP 502: Bad Gateway", "error connecting to the API server"])
+def test_a_release_that_cannot_be_looked_up_after_a_failed_create_keeps_its_tag(message, checkout_dir):
+    # Not knowing whether the release exists is not the same as knowing that it does not.
+    result = checkout_dir.run(fake={"FAKE_GH_CREATE_FAILS": "1", "FAKE_GH_VIEW_AFTER_CREATE_ERROR": message})
+
+    assert result.returncode != 0
+    assert checkout_dir.tag_deletions() == []
+    assert "::error::" in result.stdout and message in result.stderr
+
+
+def test_a_tag_that_cannot_be_taken_back_is_reported(checkout_dir):
+    result = checkout_dir.run(fake={"FAKE_GH_CREATE_FAILS": "1", "FAKE_GH_DELETE_FAILS": "1"})
+
+    version = json.loads((REPO_ROOT / MANIFEST).read_text())["version"]
+    assert result.returncode != 0
+    assert len(checkout_dir.tag_deletions()) == 1  # it was tried
+    (error,) = [line for line in result.stdout.splitlines() if line.startswith("::error::")]
+    assert f"v{version}" in error and "by hand" in error
 
 
 def test_the_first_release_lists_every_merged_pull_request(checkout_dir):

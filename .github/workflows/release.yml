@@ -110,7 +110,24 @@ jobs:
           # gh use the tag made here instead of making one itself.
           gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$HEAD_SHA" >/dev/null
           if ! gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$NOTES"; then
-            # Don't leave a tag without a release: the next run would see the tag and never make the release.
-            gh api -X DELETE "repos/$GH_REPO/git/refs/tags/$TAG" >/dev/null || true
+            # gh can report a failure after GitHub has made the release (a lost response, a 502). Taking the tag of a
+            # published release away turns that release into a draft, which the next run's check for a release would
+            # find and count as released for good. So the tag is taken back only when gh confirms there is no release.
+            if AFTER="$(gh release view "$TAG" 2>&1)"; then
+              echo "::error::Making the release for $TAG failed, but a release for it exists, so its tag stays. Check it."
+            else
+              case "$AFTER" in
+                *"release not found"*)
+                  # No release: don't leave a tag without one, or the next run would see the tag and never make it.
+                  if ! gh api -X DELETE "repos/$GH_REPO/git/refs/tags/$TAG" >/dev/null; then
+                    echo "::error::Making the release for $TAG failed and its tag could not be taken back. Delete the tag by hand."
+                  fi
+                  ;;
+                *)
+                  echo "::error::Making the release for $TAG failed, and looking for it failed too, so its tag stays. Check both."
+                  echo "$AFTER" >&2
+                  ;;
+              esac
+            fi
             exit 1
           fi
