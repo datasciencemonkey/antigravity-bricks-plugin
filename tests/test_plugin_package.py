@@ -13,7 +13,7 @@ PLUGIN = Path(__file__).resolve().parent.parent / "plugins" / "databricks-genie"
 SKILL = "antigravity-databricks-genie"
 GENIE_ONE_TOOLS = ["genie_ask", "genie_poll_response", "genie_get_query_result", "genie_cancel_response"]
 STATUSES = ["ready", "not_configured", "login_needed", "login_in_progress", "login_failed", "cli_missing",
-            "unsupported_auth"]
+            "unsupported_auth", "profile_exists_unreadable"]
 WORKSPACE_LINE = "Asking Genie in <host> (Databricks CLI profile <profile>)"
 # The 2.24.0 loader reads only these keys; `author` and `homepage` are silently dropped.
 LOADER_KEYS = {"name", "description", "displayName", "logo", "suggestedPrompts", "version", "disabled", "skills"}
@@ -289,3 +289,19 @@ def test_the_skill_leaves_a_profile_that_signs_in_another_way_alone():
     step = status_step("unsupported_auth")
 
     assert "OAuth U2M" in step and "DATABRICKS_CONFIG_PROFILE" in step and "never" in step.lower()
+
+
+def test_the_skill_leaves_a_profile_the_cli_does_not_list_alone_and_suggests_a_separate_one():
+    step = status_step("profile_exists_unreadable")
+
+    assert "DATABRICKS_CONFIG_PROFILE" in step and "separate profile" in step and "never" in step.lower()
+    assert "secret" in step
+
+
+def test_genie_connections_own_description_names_every_status_it_can_report():
+    spec = importlib.util.spec_from_file_location("genie_bridge", PLUGIN / "scripts" / "genie_bridge.py")
+    bridge = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bridge)
+    (tool,) = [tool for tool in bridge.BRIDGE_TOOLS if tool["name"] == "genie_connection"]
+
+    assert [status for status in STATUSES if status not in tool["description"]] == []

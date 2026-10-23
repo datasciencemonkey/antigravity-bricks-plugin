@@ -59,9 +59,9 @@ BRIDGE_TOOLS = [
         "description": (
             "Check the Databricks connection Genie uses. Call it once per conversation before the first genie_ask, "
             "and again to follow a sign-in that genie_setup started. Returns JSON: status (ready, not_configured, "
-            "login_needed, login_in_progress, login_failed, unsupported_auth or cli_missing), the Databricks CLI "
-            "profile, the workspace host, and next_step, which says what to do. When the profile isn't set up, it also "
-            "lists the Databricks CLI's other profiles."
+            "login_needed, login_in_progress, login_failed, unsupported_auth, profile_exists_unreadable or "
+            "cli_missing), the Databricks CLI profile, the workspace host, and next_step, which says what to do. When "
+            "the profile isn't set up, it also lists the Databricks CLI's other profiles."
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
@@ -139,6 +139,25 @@ def cli_candidates(env):
         if path not in candidates:
             candidates.append(path)
     return candidates
+
+
+def config_file(env):
+    """The file the Databricks CLI keeps its profiles in: $DATABRICKS_CONFIG_FILE, else ~/.databrickscfg."""
+    home = env.get("HOME") or os.path.expanduser("~")
+    path = env.get("DATABRICKS_CONFIG_FILE") or os.path.join(home, ".databrickscfg")
+    return os.path.join(home, path[1:].lstrip("/\\")) if path.startswith("~") else path  # the CLI expands a leading ~
+
+
+def config_sections(path):
+    """The section names in an INI config file, and nothing else: no value, which may be a secret, is parsed or kept.
+    (configparser would parse every value, and it leaves [DEFAULT] out of its sections.)"""
+    names = []
+    with open(path, encoding="utf-8-sig", errors="replace") as file:
+        for line in file:
+            line = line.strip()
+            if line.startswith("[") and "]" in line:
+                names.append(line[1:line.index("]")].strip())
+    return names
 
 
 class BridgeError(Exception):
@@ -240,6 +259,16 @@ class DatabricksCli:
 
     def own_profile(self):
         return next((item for item in self.profiles() if item["name"] == self.profile), None)
+
+    def in_config_file(self):
+        """Whether the config file has a section named like the profile, even one that `auth profiles` hides: it lists only
+        sections with a host or an account_id. A file that can't be read counts as yes, so nothing is signed in over it."""
+        try:
+            return self.profile in config_sections(config_file(self.env))
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
 
     def token(self):
         if self.cached is None or time.time() >= self.cached[1]:
@@ -399,6 +428,13 @@ def next_step(status, profile, host, url, profiles, auth_type=None):
                 "the Databricks CLI, so it can't use this profile, and genie_setup won't change it. The user can set up "
                 "a separate U2M profile: set DATABRICKS_CONFIG_PROFILE to a new profile name, restart Antigravity, and "
                 "give you the workspace URL for genie_setup. Never change this profile for them.".format(profile, method))
+    if status == "profile_exists_unreadable":
+        return ("Databricks CLI profile {0} has a section in the Databricks config file that `databricks auth profiles` doesn't "
+                "list (usually because it has no host, as with an Azure service principal that sets azure_workspace_resource_id), "
+                "or that file can't be read. Genie can't tell how the profile signs in, and signing it in again would rewrite it "
+                "and drop its secret, so genie_setup won't touch it. The user can set up a separate profile: set "
+                "DATABRICKS_CONFIG_PROFILE to a new profile name, restart Antigravity, and give you the workspace URL for "
+                "genie_setup. Never change this profile for them.".format(profile))
     if status == "login_needed":
         if not url:
             return ("Databricks CLI profile {0} has no workspace URL. Ask the user to fix it in a terminal: "
@@ -446,6 +482,8 @@ def connection(context):
         own = next((item for item in profiles if item["name"] == cli.profile), None)
         if own is not None and own["auth_type"] != U2M:  # `auth token` is U2M-only, so it always fails for these
             return report(context, "unsupported_auth", own["host"], auth_type=own["auth_type"])
+        if own is None and cli.in_config_file():  # `auth login` would rewrite a section the CLI doesn't list, and drop its secret
+            return report(context, "profile_exists_unreadable")
         if login is not None:
             return report(context, "login_failed", login["host"])
         if own is None:
@@ -476,7 +514,7 @@ def setup(arguments, context):
     state = connection(context)
     if state["status"] in ("cli_missing", "login_in_progress"):
         return state
-    if state["status"] == "unsupported_auth":
+    if state["status"] in ("unsupported_auth", "profile_exists_unreadable"):
         raise BridgeError(state["next_step"])
     own = cli.own_profile()
     if own is not None:

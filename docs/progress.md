@@ -16,6 +16,7 @@ As of 2026-10-23. Finished items are crossed out; issue numbers refer to the [pr
 - Hardening in the bridge (#33): clear errors for a missing CLI, a cancelled or failed sign-in, HTTP 403 (an IP access list or VPN), HTTP 404 (Genie One not available) and an unreachable workspace; every call ends within 160 s; a new Genie session when Genie ends the old one; no error text that could quote a token.
 - Review fixes (#33):
   - A profile that signs in another way (a personal access token or a service principal) is reported as `unsupported_auth`, and `genie_setup` never signs it in again, which would drop its token or secret.
+  - A profile that `databricks auth profiles` hides (a config section with no host or account_id, such as an Azure service principal) is found by reading only section names from the Databricks config file. It's reported as `profile_exists_unreadable`, and `genie_setup` never signs in over it, which would drop its secret.
   - Every call has a wall-clock limit, including a reply that trickles in, a slow connect, and a token refresh after a 401.
   - A background sign-in is recorded in the OS temp folder (process id, profile, workspace and start time; no token), so the bridge that `agy -p` starts for the next turn still sees it.
   - The bundled tool list stands in when Genie One answers `tools/list` with an error or nothing.

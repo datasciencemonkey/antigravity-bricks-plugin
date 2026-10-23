@@ -118,6 +118,10 @@ def genie():
 # client secret. It accepts only the flags the bridge should pass, records each call in $FAKE_CLI_CALLS, and hands out
 # the comma-separated $FAKE_TOKENS in order. FAKE_CLI_FAIL makes `auth token` fail as an expired sign-in does,
 # FAKE_PROFILES_FAIL breaks `auth profiles`, and FAKE_LOGIN_SECONDS and FAKE_LOGIN_FAIL shape `auth login`.
+# The config file, $DATABRICKS_CONFIG_FILE, holds sections the CLI hides. CLI v1.22.1's `auth profiles` lists only a
+# section that has a host or an account_id, so one with neither (an Azure service principal that sets
+# azure_workspace_resource_id) is in the config file and never in $FAKE_PROFILES. `auth login` rewrites the section it
+# signs in, as the real CLI does, keeping none of its other keys: that is how a client secret is lost.
 FAKE_CLI = r"""#!/bin/sh
 echo "$@" >> "$FAKE_CLI_CALLS"
 fail() { echo "Error: $*" >&2; exit 1; }
@@ -164,6 +168,15 @@ case "$command" in
   grep -v "^$profile " "$FAKE_PROFILES" > "$FAKE_PROFILES.new" 2>/dev/null
   mv "$FAKE_PROFILES.new" "$FAKE_PROFILES"
   echo "$profile $host databricks-cli" >> "$FAKE_PROFILES"
+  if [ -n "$DATABRICKS_CONFIG_FILE" ]; then
+    if [ -f "$DATABRICKS_CONFIG_FILE" ]; then
+      awk -v header="[$profile]" '/^[ \t]*\[/ { skipping = ($0 == header) } !skipping' "$DATABRICKS_CONFIG_FILE" > "$DATABRICKS_CONFIG_FILE.new"
+    else
+      : > "$DATABRICKS_CONFIG_FILE.new"
+    fi
+    printf '[%s]\nhost = %s\nauth_type = databricks-cli\n\n' "$profile" "$host" >> "$DATABRICKS_CONFIG_FILE.new"
+    mv "$DATABRICKS_CONFIG_FILE.new" "$DATABRICKS_CONFIG_FILE"
+  fi
   echo "Profile $profile was successfully saved"
   ;;
 "auth token")
@@ -193,6 +206,7 @@ class CliScript:
         self.path.chmod(0o755)
         self.log = folder / "cli-calls"
         self.store = folder / "cli-profiles"
+        self.config = folder / "databrickscfg"  # the CLI's config file; the bridge reads its section names
         self.tmp = folder / "tmp"  # the bridge's temp folder, where it records a sign-in in progress
         self.tmp.mkdir()
         self.set_profiles({"DEMO": WORKSPACE, "DEFAULT": WORKSPACE})
@@ -205,6 +219,11 @@ class CliScript:
             lines.append(f"{name} {host} {auth_type}\n")
         self.store.write_text("".join(lines))
 
+    def set_config(self, text):
+        """Put text in the config file. The fake `auth profiles` lists only $FAKE_PROFILES, so a section that is in the config
+        file and not in the profiles is one the CLI hides."""
+        self.config.write_text(text)
+
     def login_records(self):
         return sorted(self.tmp.glob("databricks-genie-login-*.json"))
 
@@ -216,7 +235,7 @@ class CliScript:
 
     def env(self):
         return {"DATABRICKS_CLI": str(self.path), "FAKE_CLI_CALLS": str(self.log), "FAKE_PROFILES": str(self.store),
-                "TMPDIR": str(self.tmp)}
+                "DATABRICKS_CONFIG_FILE": str(self.config), "TMPDIR": str(self.tmp)}
 
 
 @pytest.fixture
@@ -1337,3 +1356,114 @@ def test_a_token_refresh_after_a_401_gets_only_the_time_left(monkeypatch, capsys
     assert json.loads(capsys.readouterr().out) == {"jsonrpc": "2.0", "id": 3, "result": {}}
     assert cli_timeouts == [30, 19]  # the refresh after the 401 gets the 19 s left, not the CLI's usual 30
     assert url_timeouts == [150, 18, 17, 16]
+
+
+# Second review (#33): a profile the CLI hides, pages that aren't JSON, where a sign-in is recorded, a question that timed out
+
+
+SECRET = "service-principal-secret-xyz"
+
+
+def azure_service_principal(profile):
+    """A config file section that CLI v1.22.1's `auth profiles` hides, because it has neither a host nor an account_id:
+    an Azure service principal that sets azure_workspace_resource_id."""
+    return (f"[{profile}]\n"
+            "azure_workspace_resource_id = /subscriptions/0000/resourceGroups/rg/providers/Microsoft.Databricks/workspaces/ws\n"
+            f"azure_client_id = 1111\nazure_client_secret = {SECRET}\nazure_tenant_id = 2222\n")
+
+
+@pytest.mark.parametrize("profile", ["NEW", "DEFAULT"])  # [DEFAULT] is the section that configparser leaves out of its list
+def test_genie_setup_never_signs_in_over_a_config_section_the_cli_does_not_list(start, cli, profile):
+    # `auth login` would rewrite that section and drop its client secret.
+    cli.set_profiles({})
+    cli.set_config(azure_service_principal(profile))
+    before = cli.config.read_text()
+    bridge = start(DATABRICKS_CONFIG_PROFILE=profile)
+    bridge.send(call("genie_setup", {"workspace_url": WORKSPACE}))
+    reply = bridge.reply()
+    time.sleep(0.3)
+
+    assert cli.logins() == []
+    assert cli.config.read_text() == before and SECRET in cli.config.read_text()
+    assert reply["result"]["isError"] is True and "DATABRICKS_CONFIG_PROFILE" in text_of(reply)
+
+
+def test_genie_connection_reports_a_profile_the_cli_does_not_list_but_the_config_file_holds(start, genie, cli):
+    cli.set_profiles({"dev": workspace("dev-workspace")})
+    cli.set_config(azure_service_principal("NEW"))
+    bridge = start(DATABRICKS_CONFIG_PROFILE="NEW")
+    _, report = bridge.connection(3)
+    bridge.send(call("genie_ask", {"question": "Revenue last quarter?"}, number=4))
+    ask = bridge.reply()
+    stderr = bridge.close()
+
+    assert report["status"] == "profile_exists_unreadable" and report["profile"] == "NEW"
+    for words in ("DATABRICKS_CONFIG_PROFILE", "new profile name", "won't touch", "genie_setup", "Never change this profile"):
+        assert words in report["next_step"]
+    assert ask["result"]["isError"] is True and "profile_exists_unreadable" in text_of(ask)
+    assert genie.requests == []
+    assert SECRET not in json.dumps(report) + "".join(bridge.output) + stderr  # only section names are read, never values
+
+
+@pytest.mark.parametrize("variable, name", [("", ".databrickscfg"), ("~/custom.cfg", "custom.cfg")])
+def test_looks_for_the_config_file_where_the_cli_does(start, cli, tmp_path, variable, name):
+    # $DATABRICKS_CONFIG_FILE, with a leading ~ expanded to the home folder, else ~/.databrickscfg
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / name).write_text(azure_service_principal("NEW"))
+    cli.set_profiles({})
+    bridge = start(DATABRICKS_CONFIG_PROFILE="NEW", DATABRICKS_CONFIG_FILE=variable, HOME=str(home))
+    _, report = bridge.connection(3)
+
+    assert report["status"] == "profile_exists_unreadable"
+
+
+def test_a_config_file_that_cannot_be_read_counts_as_holding_the_profile(start, cli, tmp_path):
+    folder = tmp_path / "not-a-file"
+    folder.mkdir()
+    cli.set_profiles({})
+    bridge = start(DATABRICKS_CONFIG_PROFILE="NEW", DATABRICKS_CONFIG_FILE=str(folder))
+    _, report = bridge.connection(3)
+    bridge.send(call("genie_setup", {"workspace_url": WORKSPACE}, number=4))
+    setup = bridge.reply()
+    time.sleep(0.3)
+
+    assert report["status"] == "profile_exists_unreadable"
+    assert setup["result"]["isError"] is True
+    assert cli.logins() == []
+
+
+def test_genie_setup_still_signs_in_again_a_profile_the_cli_lists_when_the_config_file_holds_it_too(start, cli):
+    # The guard is for sections the CLI hides. A U2M profile it lists, whose sign-in has expired, is signed in again.
+    cli.set_config(f"[DEMO]\nhost = {WORKSPACE}\nauth_type = databricks-cli\n")
+    bridge = start(FAKE_CLI_FAIL="1")
+    bridge.send(call("genie_setup", {"workspace_url": WORKSPACE}))
+    report = report_of(bridge.reply())
+    wait_for(lambda: cli.logins())
+
+    assert report["status"] == "login_in_progress"
+    assert cli.logins() == [f"auth login --host {WORKSPACE} --profile DEMO --timeout 5m"]
+
+
+def test_a_missing_config_file_holds_no_profile(start, cli):
+    cli.set_profiles({})
+    assert not cli.config.exists()
+    bridge = start(DATABRICKS_CONFIG_PROFILE="NEW")
+    _, report = bridge.connection(3)
+
+    assert report["status"] == "not_configured"
+
+
+def test_lists_only_the_section_names_in_a_config_file(tmp_path):
+    bridge = load_bridge()
+    path = tmp_path / "databrickscfg"
+    path.write_bytes(
+        b"\xef\xbb\xbf[DEFAULT]\r\nhost = https://x\r\n\r\n  [ spaced ]  \r\n"
+        + f"token = {SECRET}\r\n[note] # a comment\r\n# [commented]\r\n; [also commented]\r\nkey = [not-a-section]\r\n".encode()
+        + b"[dev.eu]\r\nbad = \xff\xfe\r\n"
+    )
+
+    names = bridge.config_sections(path)
+
+    assert names == ["DEFAULT", "spaced", "note", "dev.eu"]
+    assert SECRET not in repr(names)
