@@ -4,9 +4,10 @@ name: release
 # and is newer than every release tag that exists. The version is the one in plugins/databricks-genie/plugin.json
 # (tools/release_tag.py reads it). This workflow never bumps or edits it: a person raises the last number (0.3.0,
 # 0.3.1, 0.3.2, ...) in the manifest.
-# The release notes list the pull requests merged since the previous release that come from this repository and were
-# opened by its owner, members or collaborators (tools/release_notes.py), then GitHub's generated list. Listing pull
-# requests needs no permission beyond the one below because the repository is public.
+# The release notes are only the ones tools/release_notes.py writes: the pull requests merged since the previous
+# release that come from this repository and were opened by its owner, members or collaborators, and a link that
+# compares the two tags. GitHub's generated notes are not added, because they name every merged pull request, the ones
+# from forks included. Listing pull requests needs no permission beyond the one below because the repository is public.
 on:
   workflow_run:
     workflows: ["tests"]
@@ -95,17 +96,18 @@ jobs:
             exit 0
           fi
           # Pull request titles and bodies are untrusted text. tools/release_notes.py turns the pull requests merged
-          # since the previous release into a notes file, and that file is the only way their text reaches gh.
+          # since the previous release into a notes file, and that file is the only way their text reaches gh. It names
+          # the tag being released for the "Full changelog" link, which takes the place of GitHub's generated notes.
           PULLS="$RUNNER_TEMP/pulls.json"
           NOTES="$RUNNER_TEMP/release-notes.md"
           gh api --paginate "repos/{owner}/{repo}/pulls?state=closed&base=main&per_page=100" > "$PULLS"
-          python3 tools/release_notes.py --repo "$GH_REPO" --pulls "$PULLS" --head "$HEAD_SHA" --output "$NOTES"
+          python3 tools/release_notes.py --repo "$GH_REPO" --tag "$TAG" --pulls "$PULLS" --head "$HEAD_SHA" --output "$NOTES"
           # The tag is made first, at exactly the commit that was tested, and then released. The release command's
           # --target only chooses the commit while the tag doesn't exist, so a tag that someone made after the checkout
           # could otherwise decide where the release points. This call fails if the tag exists, and --verify-tag makes
           # gh use the tag made here instead of making one itself.
           gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$HEAD_SHA" >/dev/null
-          if ! gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$NOTES" --generate-notes; then
+          if ! gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$NOTES"; then
             # Don't leave a tag without a release: the next run would see the tag and never make the release.
             gh api -X DELETE "repos/$GH_REPO/git/refs/tags/$TAG" >/dev/null || true
             exit 1

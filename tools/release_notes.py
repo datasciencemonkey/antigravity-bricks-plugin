@@ -1,11 +1,16 @@
 """Build release notes from the pull requests merged since the previous release tag.
 
 The release workflow gives this the JSON that `gh api --paginate "repos/<owner>/<repo>/pulls?state=closed&base=main"`
-prints (a file, or standard input), the OWNER/REPO name and the full SHA of the commit being released. It lists every
-pull request whose commit lies in the history of that commit after the previous v<major>.<minor>.<patch> tag (in all
-of it when there is no such tag yet) and writes Markdown to a file: for each pull request its title, its number and
-the bullets of its "## Summary" section, or just the title when it has none. The workflow passes the file to
-`gh release create --notes-file`, and GitHub adds its own generated list after it.
+prints (a file, or standard input), the OWNER/REPO name, the tag being released and the full SHA of the commit being
+released. It lists every pull request whose commit lies in the history of that commit after the previous
+v<major>.<minor>.<patch> tag (in all of it when there is no such tag yet) and writes Markdown to a file: for each pull
+request its title, its number and the bullets of its "## Summary" section, or just the title when it has none.
+
+When there is a previous tag, the notes end with one line, "Full changelog: <link>", where the link compares the
+previous tag with the tag being released on github.com. It is built only from the repository name and the two tag
+names, each of which has matched a strict pattern first. The workflow passes the file to `gh release create
+--notes-file` and adds nothing else. GitHub's own generated list is left out because it names every merged pull
+request, the ones from forks included, which is what the next paragraph keeps out of these notes.
 
 Only some pull requests may put text into the notes: those whose head branch lives in OWNER/REPO itself and whose
 author is the repository's owner, a member or a collaborator. Anyone can open a pull request from a fork at the head
@@ -35,8 +40,7 @@ from typing import NamedTuple
 TAG = re.compile(r"v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", re.ASCII)
 SHA = re.compile(r"[0-9a-f]{40}")
 
-# What a pull request may contribute. GitHub caps a release body at 125,000 characters and adds its generated list
-# after ours, so ours stops well short of that.
+# What a pull request may contribute. GitHub caps a release body at 125,000 characters; ours stops well short of that.
 MAX_BODY = 70_000  # characters of a pull request body that are read (GitHub allows 65,536)
 TITLE_MAX = 200
 BULLET_MAX = 400
@@ -56,12 +60,19 @@ ORDERED = re.compile(r"(\d{1,9})([.)])")
 
 # Whose pull requests may appear (the API's author_association), and what a repository name looks like.
 TRUSTED_AUTHORS = ("OWNER", "MEMBER", "COLLABORATOR")
-REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+# The owner starts with a letter or digit, and the name is not "." or ".." (the repository ".github" is real), so the
+# name can't turn the link into a path.
+REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*/(?!\.{1,2}\Z)[A-Za-z0-9_.-]+")
 
 
 def check_sha(value):
     if not isinstance(value, str) or not SHA.fullmatch(value):
         raise ValueError(f"not a full lowercase commit SHA: {str(value)[:60]!r}")
+
+
+def check_tag(value):
+    if not isinstance(value, str) or not TAG.fullmatch(value):
+        raise ValueError(f"not a release tag: {str(value)[:40]!r}")
 
 
 def git(*args, cwd=None):
@@ -87,10 +98,9 @@ def commits_since(tag, head, cwd=None):
     check_sha(head)
     if tag is None:
         revisions = head
-    elif TAG.fullmatch(tag):
-        revisions = f"{tag}..{head}"
     else:
-        raise ValueError(f"not a release tag: {str(tag)[:40]!r}")
+        check_tag(tag)
+        revisions = f"{tag}..{head}"
     return set(git("rev-list", revisions, "--", cwd=cwd).split())
 
 
@@ -251,18 +261,24 @@ def render(pull):
     return lines
 
 
-def build_notes(pulls, shas, repo, previous=None):
+def build_notes(pulls, shas, repo, previous=None, tag=None):
     """The Markdown for the pull requests in pulls that were merged in the commits in shas, oldest first.
 
     repo is the OWNER/REPO the pull requests must come from (see read_pull). previous is the release tag the notes
-    start after, if any. A pull request counts when its merge commit or its head commit is in shas, so merges made on
-    GitHub and fast-forwards both work. Items that aren't merged pull requests from repo by someone trusted, and
-    repeats of the same number, are skipped.
+    start after, if any, and tag is the release tag being made now. A pull request counts when its merge commit or its
+    head commit is in shas, so merges made on GitHub and fast-forwards both work. Items that aren't merged pull requests
+    from repo by someone trusted, and repeats of the same number, are skipped.
+
+    When there is a previous tag and a tag, the notes end with a link that compares them, after a blank line so that it
+    isn't read as part of the last list item. Its text is built from repo, previous and tag alone, each checked first.
     """
     if not isinstance(repo, str) or not REPO.fullmatch(repo):
         raise ValueError(f"not an OWNER/REPO name: {str(repo)[:60]!r}")
-    if previous is not None and not TAG.fullmatch(previous):
-        raise ValueError(f"not a release tag: {str(previous)[:40]!r}")
+    if previous is not None:
+        check_tag(previous)
+    if tag is not None:
+        check_tag(tag)
+    closing = f"\nFull changelog: https://github.com/{repo}/compare/{previous}...{tag}\n" if previous and tag else ""
     heading = f"## Pull requests since {previous}" if previous else "## Pull requests"
     merged = {}
     for pull in filter(None, (read_pull(item, repo) for item in pulls)):
@@ -271,18 +287,18 @@ def build_notes(pulls, shas, repo, previous=None):
     ordered = sorted(merged.values(), key=lambda pull: (pull.merged_at, pull.number))
     if not ordered:
         nothing = f"No pull requests were merged since {previous}." if previous else "No pull requests have been merged yet."
-        return f"{heading}\n\n{nothing}\n"
+        return f"{heading}\n\n{nothing}\n{closing}"
     lines = [heading, ""]
     size = len(heading) + 2
     for index, pull in enumerate(ordered):
         entry = render(pull)
         cost = sum(len(line) + 1 for line in entry)
-        if size + cost > NOTES_MAX - FOOTER_ROOM:
-            lines.append(f"- …and {len(ordered) - index} more pull requests (GitHub's list below has them all)")
+        if size + cost > NOTES_MAX - FOOTER_ROOM - len(closing):  # the link always fits
+            lines.append(f"- …and {len(ordered) - index} more pull requests, left out to keep these notes short")
             break
         lines += entry
         size += cost
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n" + closing
 
 
 def main(argv=None):
@@ -294,14 +310,18 @@ def main(argv=None):
     parser.add_argument(
         "--repo", required=True, help="OWNER/REPO: only pull requests from branches of this repository are listed"
     )
+    parser.add_argument(
+        "--tag", required=True,
+        help="the release tag being made now; with a previous release, the notes end with a link comparing the two",
+    )
     parser.add_argument("--output", required=True, type=Path, help="the file to write the notes to")
     args = parser.parse_args(argv)
     try:
         check_sha(args.head)
         text = sys.stdin.read() if args.pulls == "-" else Path(args.pulls).read_text(encoding="utf-8")
         pulls = load_pulls(text)
-        tag = previous_tag(args.head)
-        notes = build_notes(pulls, commits_since(tag, args.head), args.repo, tag)
+        previous = previous_tag(args.head)
+        notes = build_notes(pulls, commits_since(previous, args.head), args.repo, previous, args.tag)
         args.output.write_text(notes, encoding="utf-8")
     except subprocess.CalledProcessError as problem:
         reason = (problem.stderr or "").strip().splitlines()
@@ -310,7 +330,7 @@ def main(argv=None):
     except (OSError, ValueError) as problem:
         print(f"release_notes: {problem}", file=sys.stderr)
         return 1
-    print(f"release_notes: previous tag {tag or 'none'}")
+    print(f"release_notes: previous tag {previous or 'none'}")
     return 0
 
 

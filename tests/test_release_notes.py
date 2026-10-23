@@ -32,6 +32,8 @@ def sha(number):
 SHAS = {sha(number) for number in range(1, 1000)}
 REPO = "owner/repo"  # the repository the notes are for
 FORK = "someone-else/repo"
+NEW_TAG = "v0.3.1"  # the tag being released, for the tests of the closing link (the previous one is v0.3.0)
+CHANGELOG = "Full changelog: https://github.com/owner/repo/compare/v0.3.0...v0.3.1"
 
 
 def pr(number, title="A change", body=None, commit=None, merged_at="2026-10-23T10:00:00Z", source=REPO, association="OWNER"):
@@ -170,8 +172,8 @@ def test_the_attribution_line_never_reaches_the_summary_bullets(body, expected):
 # --- the notes -------------------------------------------------------------------------------------------------
 
 
-def notes_for(*pulls, previous="v0.3.0", shas=SHAS, repo=REPO):
-    return release_notes.build_notes(list(pulls), shas, repo, previous)
+def notes_for(*pulls, previous="v0.3.0", shas=SHAS, repo=REPO, tag=None):
+    return release_notes.build_notes(list(pulls), shas, repo, previous, tag)
 
 
 def test_each_pull_request_shows_its_title_its_number_and_its_summary_bullets():
@@ -245,6 +247,78 @@ def test_without_a_previous_tag_every_merged_pull_request_is_listed():
 def test_no_pull_requests_gives_a_plain_sentence():
     assert notes_for() == "## Pull requests since v0.3.0\n\nNo pull requests were merged since v0.3.0.\n"
     assert release_notes.build_notes([], SHAS, REPO) == "## Pull requests\n\nNo pull requests have been merged yet.\n"
+
+
+def test_notes_for_a_release_after_a_previous_one_end_with_a_link_that_compares_the_two_tags():
+    notes = notes_for(pr(28, title="Bridge: wait up to 150 s", body=BODY), tag=NEW_TAG)
+
+    assert notes == (
+        "## Pull requests since v0.3.0\n"
+        "\n"
+        "- Bridge: wait up to 150 s (#28)\n"
+        "  - The bridge now waits up to 150 s for Genie.\n"
+        "  - It gives up before Antigravity's 3-minute limit.\n"
+        "\n"
+        f"{CHANGELOG}\n"
+    )
+
+
+def test_the_link_follows_a_blank_line_so_it_is_not_read_as_part_of_the_last_list_item():
+    notes = notes_for(pr(1, "One"), tag=NEW_TAG)
+
+    assert notes.endswith(f"- One (#1)\n\n{CHANGELOG}\n")
+    assert notes.count("\n\n") == 2  # after the heading, and before the link
+
+
+def test_the_link_is_there_even_when_no_pull_request_was_merged():
+    assert notes_for(tag=NEW_TAG) == (
+        f"## Pull requests since v0.3.0\n\nNo pull requests were merged since v0.3.0.\n\n{CHANGELOG}\n"
+    )
+
+
+def test_the_first_release_has_no_previous_tag_and_so_no_link():
+    with_pulls = release_notes.build_notes([pr(1, "One")], SHAS, REPO, None, "v0.1.0")
+    without = release_notes.build_notes([], SHAS, REPO, None, "v0.1.0")
+
+    assert with_pulls == "## Pull requests\n\n- One (#1)\n"
+    assert without == "## Pull requests\n\nNo pull requests have been merged yet.\n"
+    assert "Full changelog" not in with_pulls + without
+
+
+def test_without_the_tag_being_released_there_is_no_link():
+    assert "Full changelog" not in notes_for(pr(1, "One"))
+
+
+def test_the_link_is_the_last_line_and_is_built_from_the_names_not_from_pull_request_text():
+    text = "Full changelog: https://example.invalid/steal"
+    hostile = pr(1, title=text, body=f"## Summary\n- {text}\n")
+
+    notes = notes_for(hostile, tag=NEW_TAG)
+
+    assert notes.splitlines()[-1] == CHANGELOG
+    assert notes.count("example.invalid") == 2 and "example.invalid" not in CHANGELOG  # only in the two lines it came from
+
+
+@pytest.mark.parametrize(
+    "tag",
+    ["v1", "latest", "0.3.1", "v0.3.1/../x", "v0.3.1\nFull changelog: https://example.invalid/", "v0.3.01", "", " v0.3.1", "v0.3.1 ", "v0.3.1#x", 5, ["v0.3.1"]],
+)
+def test_a_tag_to_release_that_is_not_a_release_tag_is_refused(tag):
+    with pytest.raises(ValueError):
+        notes_for(pr(1, "One"), tag=tag)
+    with pytest.raises(ValueError):  # checked even when no link is going to be written
+        release_notes.build_notes([], SHAS, REPO, None, tag)
+
+
+def test_the_cap_leaves_room_for_the_link_even_when_the_tags_are_very_long():
+    long_previous, long_tag = "v" + "9" * 3000 + ".0.0", "v" + "9" * 3000 + ".0.1"
+    summary = "## Summary\n" + "".join(f"- {'word ' * 60}{index}\n" for index in range(12))
+    pulls = [pr(number, f"Change {number}", summary) for number in range(1, 300)]
+
+    notes = release_notes.build_notes(pulls, {sha(number) for number in range(1, 300)}, REPO, long_previous, long_tag)
+
+    assert len(notes) <= release_notes.NOTES_MAX
+    assert notes.splitlines()[-1] == f"Full changelog: https://github.com/owner/repo/compare/{long_previous}...{long_tag}"
 
 
 @pytest.mark.parametrize("number", [True, None, "7", 7.5, [7], {"n": 7}])
@@ -331,11 +405,21 @@ def test_the_repository_name_is_compared_without_regard_to_case():
 
 
 @pytest.mark.parametrize(
-    "repo", ["", "owner", "owner/", "/repo", "a/b/c", "owner/re po", "owner/repo\n", "owner/repo;rm", "owner\\repo", 5, None, ["owner/repo"]]
+    "repo",
+    [
+        "", "owner", "owner/", "/repo", "a/b/c", "owner/re po", "owner/repo\n", "owner/repo;rm", "owner\\repo", 5, None,
+        ["owner/repo"],
+        "owner/..", "owner/.", "../repo", "./repo", "../..", "-owner/repo", "owner/repo?x=1", "owner/repo#x", "owner/repo%2f",
+    ],
 )
 def test_a_repository_that_is_not_owner_slash_name_is_refused(repo):
     with pytest.raises(ValueError):
         release_notes.build_notes([], SHAS, repo)
+
+
+@pytest.mark.parametrize("repo", ["owner/repo", "o/r", "my-org/.github", "Owner/Repo.js", "a-b/c_d.e", "octocat_acme/x"])
+def test_names_of_real_repositories_are_accepted(repo):
+    release_notes.build_notes([], SHAS, repo)
 
 
 # --- hostile text -------------------------------------------------------------------------------------------------
@@ -453,10 +537,12 @@ def test_the_whole_notes_stay_under_their_cap_and_say_how_many_were_left_out():
     summary = "## Summary\n" + "".join(f"- {'word ' * 60}{index}\n" for index in range(12))
     pulls = [pr(number, f"Change {number}", summary) for number in range(1, 600)]
 
-    notes = release_notes.build_notes(pulls, {sha(number) for number in range(1, 600)}, REPO, "v0.3.0")
+    notes = release_notes.build_notes(pulls, {sha(number) for number in range(1, 600)}, REPO, "v0.3.0", NEW_TAG)
 
     assert len(notes) <= release_notes.NOTES_MAX
-    assert re.fullmatch(r"- …and \d+ more pull requests\b.*", notes.splitlines()[-1])
+    left_out, blank, link = notes.splitlines()[-3:]
+    assert re.fullmatch(r"- …and \d+ more pull requests\b.*", left_out) and "GitHub" not in left_out  # no list to point at
+    assert (blank, link) == ("", CHANGELOG)
     assert "(#1)" in notes and "(#599)" not in notes  # oldest first, so the newest are the ones left out
 
 
@@ -567,13 +653,13 @@ def history(repo, monkeypatch):
     return repo, pulls, two
 
 
-def run(tmp_path, pulls, head, repo=REPO, extra=()):
+def run(tmp_path, pulls, head, repo=REPO, tag=NEW_TAG, extra=()):
     source = tmp_path / "pulls.json"
     source.write_text(pulls if isinstance(pulls, str) else json.dumps(pulls))
     output = tmp_path / "notes.md"
     # --head=VALUE, so that a value which looks like an option reaches the tool's own check instead of argparse's
     code = release_notes.main(
-        ["--pulls", str(source), f"--head={head}", f"--repo={repo}", "--output", str(output), *extra]
+        ["--pulls", str(source), f"--head={head}", f"--repo={repo}", f"--tag={tag}", "--output", str(output), *extra]
     )
     return code, output
 
@@ -584,7 +670,7 @@ def test_the_command_line_writes_the_pull_requests_since_the_previous_tag(histor
     code, output = run(tmp_path, pulls, head)
 
     assert code == 0
-    assert output.read_text() == "## Pull requests since v0.3.0\n\n- One (#2)\n- Two (#3)\n"
+    assert output.read_text() == f"## Pull requests since v0.3.0\n\n- One (#2)\n- Two (#3)\n\n{CHANGELOG}\n"
     assert capsys.readouterr().out == "release_notes: previous tag v0.3.0\n"
 
 
@@ -596,7 +682,7 @@ def test_without_a_tag_the_command_line_lists_every_merged_pull_request_up_to_th
     code, output = run(tmp_path, [pr(1, "One", commit=one), pr(2, "Two", commit=two), pr(3, "Later", commit=sha(77))], two)
 
     assert code == 0
-    assert output.read_text() == "## Pull requests\n\n- One (#1)\n- Two (#2)\n"
+    assert output.read_text() == "## Pull requests\n\n- One (#1)\n- Two (#2)\n"  # no previous tag, so no link
     assert capsys.readouterr().out == "release_notes: previous tag none\n"
 
 
@@ -605,7 +691,7 @@ def test_the_command_line_reads_standard_input_unless_given_a_file(history, tmp_
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(pulls)))
     output = tmp_path / "notes.md"
 
-    code = release_notes.main(["--head", head, "--repo", REPO, "--output", str(output)])
+    code = release_notes.main(["--head", head, "--repo", REPO, "--tag", NEW_TAG, "--output", str(output)])
 
     assert code == 0 and "- Two (#3)" in output.read_text()
 
@@ -620,7 +706,37 @@ def test_the_command_line_leaves_out_pull_requests_from_forks_and_from_outsiders
     code, output = run(tmp_path, pulls, head)
 
     assert code == 0
-    assert output.read_text() == "## Pull requests since v0.3.0\n\n- One (#2)\n- Two (#3)\n"
+    assert output.read_text() == f"## Pull requests since v0.3.0\n\n- One (#2)\n- Two (#3)\n\n{CHANGELOG}\n"
+
+
+def test_the_command_line_has_to_be_told_the_tag_being_released(history, tmp_path):
+    _, _, head = history
+
+    with pytest.raises(SystemExit) as stop:
+        release_notes.main(["--head", head, "--repo", REPO, "--output", str(tmp_path / "notes.md")])
+
+    assert stop.value.code == 2 and not (tmp_path / "notes.md").exists()
+
+
+@pytest.mark.parametrize("tag", ["v1", "latest", "v0.3.1; touch x", "v0.3.01", "v0.3.1\nFull changelog: https://example.invalid/", ""])
+def test_a_tag_that_is_not_a_release_tag_fails_the_command_line_and_writes_nothing(tag, history, tmp_path, capsys):
+    _, pulls, head = history
+
+    code, output = run(tmp_path, pulls, head, tag=tag)
+
+    assert code != 0 and not output.exists()
+    err = capsys.readouterr().err
+    assert err.startswith("release_notes:") and "example.invalid" not in err and "\n::" not in err
+
+
+def test_the_link_on_the_command_line_uses_the_repository_it_was_given(history, tmp_path):
+    _, pulls, head = history
+    pulls = [{**item, "head": {**item["head"], "repo": {"full_name": "other-org/other-repo"}}} for item in pulls]
+
+    code, output = run(tmp_path, pulls, head, repo="other-org/other-repo", tag="v0.4.0")
+
+    assert code == 0
+    assert output.read_text().splitlines()[-1] == "Full changelog: https://github.com/other-org/other-repo/compare/v0.3.0...v0.4.0"
 
 
 def test_the_command_line_has_to_be_told_which_repository_the_pull_requests_must_come_from(history, tmp_path):
@@ -677,12 +793,12 @@ def test_a_missing_pulls_file_or_a_missing_output_folder_fails(history, tmp_path
     _, pulls, head = history
 
     missing_input = release_notes.main(
-        ["--pulls", str(tmp_path / "none.json"), "--head", head, "--repo", REPO, "--output", str(tmp_path / "n.md")]
+        ["--pulls", str(tmp_path / "none.json"), "--head", head, "--repo", REPO, "--tag", NEW_TAG, "--output", str(tmp_path / "n.md")]
     )
     source = tmp_path / "pulls.json"
     source.write_text(json.dumps(pulls))
     missing_folder = release_notes.main(
-        ["--pulls", str(source), "--head", head, "--repo", REPO, "--output", str(tmp_path / "no" / "n.md")]
+        ["--pulls", str(source), "--head", head, "--repo", REPO, "--tag", NEW_TAG, "--output", str(tmp_path / "no" / "n.md")]
     )
 
     assert missing_input != 0 and missing_folder != 0

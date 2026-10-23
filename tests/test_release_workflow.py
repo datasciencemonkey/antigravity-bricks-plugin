@@ -149,6 +149,13 @@ def test_a_version_not_newer_than_an_existing_release_tag_is_skipped_with_a_noti
     assert '[ -z "$NEWER" ]' in after and "::notice" in after and "exit 0" in after
 
 
+def test_the_release_has_only_our_own_notes_because_githubs_generated_list_names_pull_requests_from_forks():
+    script = release_step(release_workflow())["run"]
+    commands = "\n".join(line for line in script.splitlines() if not line.strip().startswith("#"))  # without the comments
+
+    assert "--generate-notes" not in commands and "generate-notes" not in commands and "--notes " not in commands
+
+
 def test_the_answer_to_whether_a_release_exists_is_not_thrown_away():
     script = release_step(release_workflow())["run"]
     view = next(line for line in script.splitlines() if "gh release view" in line)
@@ -183,9 +190,13 @@ def test_the_notes_are_built_by_release_notes_py_and_reach_gh_only_as_a_file():
     create = next(line for line in script.splitlines() if "gh release create" in line)
 
     assert 'gh api --paginate "repos/{owner}/{repo}/pulls?state=closed&base=main' in script
-    # --repo: only pull requests from branches of this repository, by its owner, members and collaborators, are listed
-    assert 'python3 tools/release_notes.py --repo "$GH_REPO" --pulls "$PULLS" --head "$HEAD_SHA" --output "$NOTES"' in script
-    assert '--notes-file "$NOTES"' in create and "--generate-notes" in create  # ours first, then GitHub's generated list
+    # --repo: only pull requests from branches of this repository, by its owner, members and collaborators, are listed;
+    # --tag: the tag being released, which the closing "Full changelog" link names
+    assert (
+        'python3 tools/release_notes.py --repo "$GH_REPO" --tag "$TAG" --pulls "$PULLS" --head "$HEAD_SHA" --output "$NOTES"'
+        in script
+    )
+    assert '--notes-file "$NOTES"' in create
     assert "--notes " not in create and "--notes=" not in create  # never the text itself on the command line
     assert script.index("tools/release_notes.py") < script.index("gh release create")
     assert re.fullmatch(r'NOTES="\$RUNNER_TEMP/[\w.-]+\.md"', next(line.strip() for line in script.splitlines() if line.strip().startswith("NOTES=")))
@@ -382,7 +393,7 @@ def test_a_new_version_gets_a_tag_and_a_release_at_the_tested_commit(checkout_di
     assert tag_ref == ["api", "repos/owner/repo/git/refs", "-f", f"ref=refs/tags/v{version}", "-f", f"sha={checkout_dir.head}"]
     (create,) = checkout_dir.creates()
     assert create[:6] == ["release", "create", f"v{version}", "--verify-tag", "--title", f"v{version}"]
-    assert "--target" not in create
+    assert "--target" not in create and "--generate-notes" not in create
     assert checkout_dir.tag_deletions() == []
     calls = checkout_dir.gh_calls()
     assert calls.index(tag_ref) < calls.index(create)  # the tag exists before the release is made from it
@@ -590,9 +601,10 @@ def test_the_release_gets_a_notes_file_of_the_pull_requests_merged_since_the_pre
     (entry,) = checkout_dir.create_entries()
     args = entry["args"]
     assert Path(args[args.index("--notes-file") + 1]).parent == checkout_dir.runner_temp
-    assert "--generate-notes" in args  # GitHub's own list follows ours
+    assert "--generate-notes" not in args  # GitHub's list would name pull requests that are not ours to list
     assert entry["notes"] == (
         "## Pull requests since v0.3.0\n\n- Bump the version (#2)\n  - Fixes the thing.\n  - Needs no setup.\n"
+        "\nFull changelog: https://github.com/owner/repo/compare/v0.3.0...v0.3.1\n"  # GH_REPO is owner/repo
     )
     assert [call[0] for call in checkout_dir.gh_calls()] == ["release", "api", "api", "release"]  # view, pulls, tag, release
 
@@ -640,7 +652,18 @@ def test_the_first_release_lists_every_merged_pull_request(checkout_dir):
 
     assert result.returncode == 0, result.stderr
     (entry,) = checkout_dir.create_entries()
-    assert entry["notes"] == "## Pull requests\n\n- The first change (#1)\n"
+    assert entry["notes"] == "## Pull requests\n\n- The first change (#1)\n"  # no previous release, so no changelog link
+
+
+def test_the_changelog_link_names_the_tag_being_released_and_the_previous_release(checkout_dir):
+    checkout_dir.repo.git("tag", "v0.2.9")
+    checkout_dir.set_version("0.3.0")
+
+    result = checkout_dir.run()
+
+    assert result.returncode == 0, result.stderr
+    (entry,) = checkout_dir.create_entries()
+    assert entry["notes"].splitlines()[-1] == "Full changelog: https://github.com/owner/repo/compare/v0.2.9...v0.3.0"
 
 
 def test_pull_request_text_reaches_the_notes_file_but_never_a_command_line_or_a_shell(checkout_dir):
