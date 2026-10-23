@@ -1,5 +1,6 @@
 """tools/release_tag.py: the release tag is "v" plus the manifest's version, and a version that isn't three numbers stops the release."""
 import ast
+import io
 import json
 import re
 import subprocess
@@ -142,6 +143,104 @@ def test_every_three_number_version_is_accepted(version, tmp_path, capsys):
     code, out, _ = run_main(manifest_with(tmp_path, {"version": version}), capsys)
 
     assert (code, out) == (0, f"v{version}\n")
+
+
+# --- --newer-than-tags: the version must be newer than every release tag that already exists ----------------------
+
+
+def newer_than(tags, version, tmp_path, capsys, monkeypatch):
+    """Run --newer-than-tags with the given tag names on standard input (one per line, as git tag --list prints them)."""
+    monkeypatch.setattr(sys, "stdin", io.StringIO("".join(f"{tag}\n" for tag in tags)))
+    code = release_tag.main(["--newer-than-tags", str(manifest_with(tmp_path, {"version": version}))])
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+@pytest.mark.parametrize(
+    "version, tags",
+    [
+        ("0.3.1", []),
+        ("0.3.1", ["v0.3.0"]),
+        ("0.3.1", ["v0.2.9", "v0.3.0", "v0.1.0"]),
+        ("0.3.10", ["v0.3.9"]),  # 10 is above 9, though "10" sorts below "9" as text
+        ("1.0.0", ["v0.99.99"]),
+        ("0.10.0", ["v0.9.9", "v0.9.10"]),
+        ("1.0.0", ["v0.3.0", "v0.3.5", "v0.10.0"]),
+    ],
+)
+def test_a_version_above_every_existing_release_tag_is_printed(version, tags, tmp_path, capsys, monkeypatch):
+    code, out, err = newer_than(tags, version, tmp_path, capsys, monkeypatch)
+
+    assert (code, out, err) == (0, f"v{version}\n", "")
+
+
+@pytest.mark.parametrize(
+    "version, tags, newest",
+    [
+        ("0.3.1", ["v0.3.1"], "v0.3.1"),  # the same version: its tag exists
+        ("0.3.1", ["v0.3.5"], "v0.3.5"),
+        ("0.3.1", ["v0.3.0", "v0.3.5", "v0.2.0"], "v0.3.5"),
+        ("0.3.9", ["v0.3.10"], "v0.3.10"),
+        ("0.9.0", ["v0.10.0"], "v0.10.0"),
+        ("0.99.99", ["v1.0.0"], "v1.0.0"),
+    ],
+)
+def test_a_version_at_or_below_an_existing_release_tag_prints_nothing_and_says_why(version, tags, newest, tmp_path, capsys, monkeypatch):
+    code, out, err = newer_than(tags, version, tmp_path, capsys, monkeypatch)
+
+    assert (code, out) == (0, "")  # nothing to release is not a failure; the empty output is the answer
+    assert err.startswith("release_tag:") and f"v{version}" in err and newest in err
+
+
+@pytest.mark.parametrize(
+    "stray",
+    [
+        "v99", "v1", "latest", "v1.0.0-rc1", "v0.3.01", "v01.0.0", "V9.9.9", "release-9.9.9", "v1.2.3.4", "v9.9",
+        "v9.9.9+build", "main", "", "v\u0663.\u0660.\u0660", "9.9.9",
+    ],
+)
+def test_names_that_are_not_release_tags_do_not_count(stray, tmp_path, capsys, monkeypatch):
+    code, out, err = newer_than([stray, "v0.3.0"], "0.3.1", tmp_path, capsys, monkeypatch)
+
+    assert (code, out, err) == (0, "v0.3.1\n", "")
+
+
+def test_a_trailing_carriage_return_or_space_on_a_tag_line_does_not_hide_the_tag(tmp_path, capsys, monkeypatch):
+    # Reading too strictly could let a release through out of order; a stray space can only make the check stricter.
+    code, out, _ = newer_than(["v0.3.5\r", " v0.3.4 "], "0.3.1", tmp_path, capsys, monkeypatch)
+
+    assert (code, out) == (0, "")
+
+
+def test_a_bad_version_still_fails_in_this_mode_and_prints_nothing(tmp_path, capsys, monkeypatch):
+    code, out, err = newer_than(["v0.3.0"], "0.3.01", tmp_path, capsys, monkeypatch)
+
+    assert code == 1 and out == "" and err.startswith("release_tag:")
+
+
+def test_the_plain_mode_never_reads_standard_input(tmp_path, capsys, monkeypatch):
+    class Unreadable(io.StringIO):
+        def read(self, *args):
+            raise AssertionError("standard input was read")
+
+        __iter__ = readline = readlines = read
+
+    monkeypatch.setattr(sys, "stdin", Unreadable())
+
+    code, out, _ = run_main(manifest_with(tmp_path, {"version": "0.3.1"}), capsys)
+
+    assert (code, out) == (0, "v0.3.1\n")
+
+
+def test_the_mode_works_as_a_command_in_a_pipe_the_way_the_workflow_uses_it(tmp_path):
+    manifest = manifest_with(tmp_path, {"version": "0.3.1"})
+    command = [sys.executable, str(SCRIPT), "--newer-than-tags", str(manifest)]
+
+    newer = subprocess.run(command, input="v0.2.0\nv0.3.0\n", capture_output=True, text=True)
+    not_newer = subprocess.run(command, input="v0.2.0\nv0.3.1\n", capture_output=True, text=True)
+
+    assert (newer.returncode, newer.stdout) == (0, "v0.3.1\n")
+    assert (not_newer.returncode, not_newer.stdout) == (0, "") and "v0.3.1" in not_newer.stderr
 
 
 def test_the_tool_uses_only_the_standard_library_so_a_bare_runner_can_run_it():

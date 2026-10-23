@@ -132,10 +132,21 @@ def test_checks_for_the_tag_and_the_release_before_it_creates_anything():
 
     tag_exists = script.index("git rev-parse -q --verify")
     release_exists = script.index("gh release view")
+    newer = script.index("--newer-than-tags")
     create = script.index("gh release create")
-    assert tag_exists < release_exists < create
+    assert tag_exists < release_exists < newer < create
     assert script[tag_exists:release_exists].count("exit 0") == 1  # a tag that exists ends the run
-    assert script[release_exists:create].count("exit 0") == 1  # so does a release that exists
+    assert script[release_exists:newer].count("exit 0") == 1  # so does a release that exists
+    assert script[newer:create].count("exit 0") == 1  # and so does a version that is not newer than a release tag
+
+
+def test_a_version_not_newer_than_an_existing_release_tag_is_skipped_with_a_notice():
+    script = release_step(release_workflow())["run"]
+
+    command = "git tag --list 'v*' | python3 tools/release_tag.py --newer-than-tags"
+    assert f'NEWER="$({command})"' in script  # in a variable, so a failing pipe stops the step (set -e, pipefail)
+    after = script[script.index(command):script.index("PULLS=")]
+    assert '[ -z "$NEWER" ]' in after and "::notice" in after and "exit 0" in after
 
 
 def test_the_answer_to_whether_a_release_exists_is_not_thrown_away():
@@ -167,7 +178,8 @@ def test_the_notes_are_built_by_release_notes_py_and_reach_gh_only_as_a_file():
 
 def test_never_edits_the_manifest_or_pushes_or_commits():
     for script in run_scripts(release_workflow()):
-        for forbidden in (r"plugin\.json", r"git commit", r"git push", r"git tag", r"git add", r"\bsed\b", r"> plugins"):
+        # (git tag --list only reads the tags; the tag itself is made on GitHub, by the release)
+        for forbidden in (r"plugin\.json", r"git commit", r"git push", r"git tag(?! --list)", r"git add", r"\bsed\b", r"> plugins"):
             assert not re.search(forbidden, script), forbidden
 
 
@@ -299,10 +311,10 @@ class Checkout:
             "GH_TOKEN": "not-a-real-token", "GH_REPO": "owner/repo", "HEAD_SHA": self.head if head_sha is None else head_sha,
             "RUNNER_TEMP": str(self.runner_temp), **(fake or {}),
         }
-        # GitHub runs `run:` steps as `bash --noprofile --norc -eo pipefail {0}`.
+        # A `run:` step with no `shell:` runs as `bash -e {0}`: errors stop it, but a failure inside a pipe doesn't unless
+        # the script sets pipefail itself (only an explicit `shell: bash` adds it), so the stand-in run doesn't add it.
         return subprocess.run(
-            ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(self.script)],
-            cwd=self.repo.path, env=env, capture_output=True, text=True,
+            ["bash", "-e", str(self.script)], cwd=self.repo.path, env=env, capture_output=True, text=True,
         )
 
     def ran_the_canary(self):
@@ -403,6 +415,59 @@ def test_a_version_that_already_has_a_release_is_left_alone(checkout_dir):
     result = checkout_dir.run(release_exists=True)
 
     assert result.returncode == 0, result.stderr
+    assert checkout_dir.creates() == []
+
+
+def test_a_re_run_for_a_version_below_an_existing_release_tag_is_skipped_with_a_notice(checkout_dir):
+    # The tests ran again for an old commit, whose version was never tagged, while a newer release exists.
+    checkout_dir.repo.git("tag", "v0.3.5")
+    checkout_dir.set_version("0.3.1")
+
+    result = checkout_dir.run()
+
+    assert result.returncode == 0, result.stderr
+    assert [call[:2] for call in checkout_dir.gh_calls()] == [["release", "view"]]  # no pull requests, no tag, no release
+    (notice,) = [line for line in result.stdout.splitlines() if line.startswith("::notice")]
+    assert "v0.3.1" in notice
+
+
+@pytest.mark.parametrize(
+    "version, tag, released",
+    [("0.3.10", "v0.3.9", True), ("0.3.9", "v0.3.10", False), ("1.0.0", "v0.99.99", True), ("0.9.0", "v0.10.0", False)],
+)
+def test_versions_are_compared_as_numbers_not_as_text(version, tag, released, checkout_dir):
+    checkout_dir.repo.git("tag", tag)
+    checkout_dir.set_version(version)
+
+    result = checkout_dir.run()
+
+    assert result.returncode == 0, result.stderr
+    assert (len(checkout_dir.creates()) == 1) is released
+
+
+def test_names_that_are_not_release_tags_do_not_hold_a_release_back(checkout_dir):
+    for stray in ("v99", "v1", "latest", "v0.3.01", "v1.0.0-rc1", "V9.9.9", "v9.9"):
+        checkout_dir.repo.git("tag", stray)
+    checkout_dir.set_version("0.3.1")
+
+    result = checkout_dir.run()
+
+    assert result.returncode == 0, result.stderr
+    assert [create[2] for create in checkout_dir.creates()] == ["v0.3.1"]
+
+
+def test_a_git_failure_while_listing_the_tags_stops_the_release_instead_of_reading_as_no_tags(checkout_dir):
+    shim = checkout_dir.bin / "git"
+    shim.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = tag ] && [ "$2" = --list ] && [ "$3" = "v*" ]; then echo "fatal: simulated failure" >&2; exit 128; fi\n'
+        f'exec "{shutil.which("git")}" "$@"\n'
+    )
+    shim.chmod(shim.stat().st_mode | stat.S_IXUSR)
+
+    result = checkout_dir.run()
+
+    assert result.returncode != 0 and "simulated failure" in result.stderr
     assert checkout_dir.creates() == []
 
 

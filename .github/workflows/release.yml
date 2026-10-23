@@ -84,6 +84,14 @@ jobs:
               exit 1
               ;;
           esac
+          # Never make a release for a version that is not newer than a release tag that exists. Without this, a re-run
+          # of the tests for an old commit, or a version that was skipped, would add a release out of order. The answer
+          # goes into a variable so that a failing git (set -e, pipefail) stops the step instead of reading as "no tags".
+          NEWER="$(git tag --list 'v*' | python3 tools/release_tag.py --newer-than-tags)"
+          if [ -z "$NEWER" ]; then
+            echo "::notice title=Nothing to release::$TAG is not newer than a release tag that already exists."
+            exit 0
+          fi
           # Pull request titles and bodies are untrusted text. tools/release_notes.py turns the pull requests merged
           # since the previous release into a notes file, and that file is the only way their text reaches gh.
           PULLS="$RUNNER_TEMP/pulls.json"
