@@ -42,6 +42,8 @@ SHARED_FACTS = [
     "IP access list",
     "IDE 2.5.5",
     "doesn't run plugin MCP servers",
+    "has no `~/.databrickscfg` yet, and that's fine: the first sign-in creates it",
+    "`DATABRICKS_HOST` and the other `DATABRICKS_*` sign-in variables in your environment are ignored",
     TRADEMARK,
 ]
 
@@ -235,9 +237,91 @@ def test_a_question_that_times_out_is_explained_with_the_limits_and_the_duplicat
 
 
 @pytest.mark.parametrize("path", DOCUMENTS)
+def test_the_timeout_entry_covers_follow_ups_results_and_a_connection_that_never_happened(path):
+    entry = troubleshooting_bullet(path, "A question times out:")
+
+    assert "For a follow-up, which continues an earlier conversation, it first cancels the question still running there" in entry
+    assert "A timeout while fetching a full result or cancelling starts no question, so the agent just tries again" in entry
+    assert "the request wasn't sent and nothing runs twice" in entry
+    assert "network and the VPN" in entry
+
+
+@pytest.mark.parametrize("path", DOCUMENTS)
+def test_profile_exists_unreadable_says_keys_count_an_empty_header_does_not_and_headerless_keys_are_defaults(path):
+    entry = troubleshooting_bullet(path, "`profile_exists_unreadable`:")
+
+    for fact in ("holds keys for it", "reads only key names, never a value",
+                 "Keys that come before the first header belong to the `DEFAULT` profile",
+                 "A header with no keys under it holds nothing to lose",
+                 "the empty `[DEFAULT]` header that `databricks configure` writes"):
+        assert fact in entry, fact
+    assert "section names" not in entry  # the bridge reads key names now
+
+
+@pytest.mark.parametrize("path", DOCUMENTS)
+def test_use_another_profile_says_the_profiles_workspace_decides_where_its_token_goes(path):
+    profile = section(path, "Use another Databricks CLI profile")
+
+    for fact in ("always called at the workspace of the Databricks CLI profile it uses",
+                 "the only place the profile's token goes",
+                 "the plugin doesn't pass them to the Databricks CLI",
+                 "The only variables that choose a profile or a config file are `DATABRICKS_CONFIG_PROFILE` and "
+                 "`DATABRICKS_CONFIG_FILE`"):
+        assert fact in profile, fact
+
+
+def test_the_security_section_says_where_the_token_goes_and_when_a_profile_is_profile_exists_unreadable():
+    security = section(README, "Security")
+    (where,) = [line for line in security.splitlines() if line.startswith("- **Where your token goes:**")]
+
+    for fact in ("workspace of the Databricks CLI profile it came from", "`DATABRICKS_HOST`", "`DATABRICKS_*` sign-in variables",
+                 "doesn't pass them to the Databricks CLI"):
+        assert fact in where, fact
+    assert "one that the CLI doesn't list but that has settings in the Databricks config file gets `profile_exists_unreadable`" in security
+
+
+@pytest.mark.parametrize("path", DOCUMENTS)
+def test_first_use_says_a_machine_with_no_config_file_can_set_up(path):
+    first_use = section(path, "First use")
+
+    assert "A machine that has never used the Databricks CLI has no `~/.databrickscfg` yet, and that's fine: the first sign-in creates it." in first_use
+
+
+@pytest.mark.parametrize("path", DOCUMENTS)
+def test_the_user_docs_leave_out_the_genie_mcp_url_test_hook(path):
+    assert "GENIE_MCP_URL" not in read(path)
+
+
+@pytest.mark.parametrize("path", DOCUMENTS)
 def test_the_older_entry_that_said_to_ask_the_agent_to_check_again_is_merged_into_the_one_above(path):
     # It told readers the agent polls with the same IDs, which a question that timed out never got.
     assert "**A call timed out:**" not in section(path, "Troubleshooting")
+
+
+def test_whats_in_this_repo_comes_just_before_development_and_tells_users_the_install_url_is_all_they_need():
+    headings = re.findall(r"^## (.*)$", read(README), re.MULTILINE)
+    body = section(README, "What's in this repo")
+
+    assert headings[headings.index("Development") - 1] == "What's in this repo"
+    assert "only the install URL" in body
+    assert "a manifest, the bridge script, the skill, the rule and the logo" in body
+    assert "for developing it" in body
+
+
+def test_whats_in_this_repo_names_only_files_and_folders_that_exist():
+    body = section(README, "What's in this repo")
+
+    for path in ("plugins/databricks-genie/", "tests/", "tools/", "scripts/hooks/", ".github/workflows/", "pyproject.toml", "uv.lock",
+                 "AGENTS.md", "docs/progress.md"):
+        assert f"`{path}`" in body, path
+        assert (REPO_ROOT / path).exists(), path
+    for part in ("plugin.json", "scripts/genie_bridge.py", "skills/antigravity-databricks-genie/SKILL.md", "rules/AGENTS.md",
+                 "assets/logo.png"):  # the plugin's manifest, bridge script, skill, rule and logo
+        assert (PLUGIN / part).is_file(), part
+
+
+def test_whats_in_this_repo_stays_short():
+    assert len(section(README, "What's in this repo").strip().splitlines()) <= 8
 
 
 def test_development_points_at_the_test_command_and_agents_md():

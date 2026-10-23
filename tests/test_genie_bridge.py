@@ -1520,7 +1520,7 @@ def test_genie_connection_reports_a_profile_the_cli_does_not_list_but_the_config
         assert words in report["next_step"]
     assert ask["result"]["isError"] is True and "profile_exists_unreadable" in text_of(ask)
     assert genie.requests == []
-    assert SECRET not in json.dumps(report) + "".join(bridge.output) + stderr  # only section names are read, never values
+    assert SECRET not in json.dumps(report) + "".join(bridge.output) + stderr  # only key names are read, never values
 
 
 @pytest.mark.parametrize("variable, name", [("", ".databrickscfg"), ("~/custom.cfg", "custom.cfg")])

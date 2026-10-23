@@ -45,7 +45,7 @@ The plugin uses your `DEFAULT` Databricks CLI profile. The first time you ask Ge
 3. It calls `genie_setup`, which runs `databricks auth login` for that workspace, and a browser window opens. Sign in with your usual single sign-on and MFA. There's no token to create or paste.
 4. When you've signed in, tell the agent in the chat, and it carries on. Before each question, the agent says "Asking Genie in <host> (Databricks CLI profile <profile>)".
 
-When a sign-in expires, the agent signs you in again to the same workspace. `genie_setup` never changes which workspace an existing profile points to. You can also sign in yourself: `databricks auth login --host https://<workspace>.cloud.databricks.com --profile DEFAULT`.
+When a sign-in expires, the agent signs you in again to the same workspace. `genie_setup` never changes which workspace an existing profile points to. A machine that has never used the Databricks CLI has no `~/.databrickscfg` yet, and that's fine: the first sign-in creates it. You can also sign in yourself: `databricks auth login --host https://<workspace>.cloud.databricks.com --profile DEFAULT`.
 
 The setup lives only in the Databricks CLI's own config, so the Antigravity CLI and the desktop app use the same profile.
 
@@ -57,6 +57,8 @@ Set `DATABRICKS_CONFIG_PROFILE` to the profile's name in the environment Antigra
 - The desktop app on a Mac: quit the app fully (Cmd-Q), then open it with `open -a Antigravity --env DATABRICKS_CONFIG_PROFILE=<name>`. The profile applies to that launch only, so no other app on your Mac sees it. To go back to `DEFAULT`, quit the app and open it as usual.
 
 If that profile doesn't exist yet, the agent sets it up the same way on first use.
+
+Genie is always called at the workspace of the Databricks CLI profile it uses, and that is the only place the profile's token goes. `DATABRICKS_HOST` and the other `DATABRICKS_*` sign-in variables in your environment are ignored, and the plugin doesn't pass them to the Databricks CLI. The only variables that choose a profile or a config file are `DATABRICKS_CONFIG_PROFILE` and `DATABRICKS_CONFIG_FILE`.
 
 ## Headless runs
 
@@ -94,9 +96,9 @@ Each one works on its own in a new chat, so any of them is a good first question
 
 - **Sign-in errors:** ask the agent to check the Genie connection, and it signs you in again if needed. Or run `databricks auth login --profile <name>` yourself.
 - **`unsupported_auth`:** your Databricks CLI profile signs in with a personal access token or a service principal. Genie here signs in with OAuth U2M through the Databricks CLI, so the agent won't use or change that profile. Set `DATABRICKS_CONFIG_PROFILE` to a new profile name and restart Antigravity, and the agent sets that one up.
-- **`profile_exists_unreadable`:** the same applies to a profile that `databricks auth profiles` doesn't list because its section has no host, such as an Azure service principal. The agent finds its name in the Databricks config file (`~/.databrickscfg`, or the file `DATABRICKS_CONFIG_FILE` names), reading only section names, and never signs in over it. Use a new profile name, as above.
+- **`profile_exists_unreadable`:** the same applies to a profile that `databricks auth profiles` doesn't list because it has no host, such as an Azure service principal, when the Databricks config file (`~/.databrickscfg`, or the file `DATABRICKS_CONFIG_FILE` names) holds keys for it. The agent reads only key names, never a value, and never signs in over those keys. Keys that come before the first header belong to the `DEFAULT` profile. A header with no keys under it holds nothing to lose, such as the empty `[DEFAULT]` header that `databricks configure` writes, so the agent sets that profile up as usual. Use a new profile name, as above.
 - **HTTP 403:** the workspace may only accept connections from certain networks (an IP access list). Connect to the VPN if it needs one, and try again.
-- **A question times out:** Antigravity ends every tool call after 3 minutes, so the plugin stops waiting on Genie after 150 seconds. Genie keeps working on it after the bridge gives up. If the timeout came while the agent was waiting for an answer, it polls again with the same IDs. If the question itself timed out, its IDs never came back, and asking again starts a duplicate question, so the agent waits a minute or two first.
+- **A question times out:** Antigravity ends every tool call after 3 minutes, so the plugin stops waiting on Genie after 150 seconds. Genie keeps working on it after the bridge gives up. If the timeout came while the agent was waiting for an answer, it polls again with the same IDs. If the question itself timed out, its IDs never came back, and asking again starts a duplicate question, so the agent waits a minute or two first. For a follow-up, which continues an earlier conversation, it first cancels the question still running there. A timeout while fetching a full result or cancelling starts no question, so the agent just tries again. If the plugin couldn't connect to your workspace in time, the request wasn't sent and nothing runs twice: check the network and the VPN, then try again.
 - **"Genie returned a non-JSON page":** a proxy or a single sign-on page answered instead of Genie. Check the VPN, the proxy and your sign-in, and try again.
 - **HTTP 404:** Genie One isn't available in that workspace. A workspace admin may need to turn on partner-powered AI features.
 - **The Genie tools don't show up:** check that `python3 --version` works in a terminal, then restart Antigravity.

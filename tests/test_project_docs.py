@@ -209,3 +209,101 @@ def test_the_public_docs_name_no_internal_tool():
     internal_tool = "FE" "VM"  # split, so this file doesn't contain the name either
     for path in (AGENTS, PROGRESS, REPO_ROOT / "README.md", REPO_ROOT / "plugins" / "databricks-genie" / "README.md"):
         assert internal_tool not in path.read_text(), path.name
+
+
+# What the #33 follow-ups changed: the bridge's hidden-profile rule, the profile's host, a machine with no config file, the
+# timeout errors, and the Databricks CLI behaviours they were checked against.
+
+
+def decisions():
+    return section(AGENTS, "## Decisions")
+
+
+def test_the_sign_in_decision_reads_the_workspace_from_auth_profiles_not_the_retired_auth_describe():
+    decision = bullet(decisions(), "- Sign-in (#8)")
+
+    assert "`databricks auth profiles`" in decision and "no network call" in decision
+    assert "auth describe" not in decision
+
+
+def test_the_first_use_decision_records_what_the_bridge_does_with_the_config_file():
+    decision = bullet(decisions(), "- First-use setup")
+
+    for fact in ("A missing config file means no profiles", "`auth profiles` exits 1 when there is no file",
+                 "reads the key names of each section", "never a value", "at least one key",
+                 "Keys before the first header count as DEFAULT's", "go-ini", "A header with no keys doesn't count",
+                 "`databricks configure` writes an empty `[DEFAULT]` header into a new config",
+                 "A config file the bridge can't read counts as holding keys"):
+        assert fact in decision, fact
+    assert "checks the section names" not in decision  # it reads key names now
+
+
+def test_the_first_use_decision_says_the_profiles_host_decides_where_its_token_goes():
+    decision = bullet(decisions(), "- First-use setup")
+
+    for fact in ("The workspace comes only from the profile, because the token is the profile's",
+                 "an inherited `DATABRICKS_HOST` doesn't steer it",
+                 "no `DATABRICKS_*` variable except `DATABRICKS_CONFIG_FILE` and `DATABRICKS_CONFIG_PROFILE`",
+                 "`GENIE_MCP_URL`", "only for a loopback URL"):
+        assert fact in decision, fact
+
+
+def test_the_standalone_connector_decision_says_what_each_kind_of_timeout_tells_the_agent():
+    decision = bullet(decisions(), "- Standalone connector")
+
+    for fact in ("asking again starts a duplicate question", "`genie_cancel_response` with its `conversation_id` first",
+                 "gets its IDs back for polling", "Fetching a result or cancelling starts no question",
+                 "the request wasn't sent"):
+        assert fact in decision, fact
+
+
+def test_what_we_know_records_how_the_real_databricks_cli_behaves():
+    known = what_we_know()
+    exits = bullet(known, "- `databricks auth profiles --skip-validate` exits 1")
+    lists = bullet(known, "- It lists only config sections that have a host or an account_id")
+    parser = bullet(known, "- The INI parser (go-ini)")
+    configure = bullet(known, "- `databricks configure --host <host> --profile <name>`")
+    stand_in = bullet(known, "- The tests keep a stand-in")
+
+    assert "**The Databricks CLI (v1.22.1, checked against the real CLI in #33)**" in known
+    for fact in ("config file is missing", "a new machine has none", "a folder", '`{"profiles": null}` for an empty file'):
+        assert fact in exits, fact
+    for fact in ("`account_id`", "`azure_workspace_resource_id`", "an empty header"):
+        assert fact in lists, fact
+    for fact in ("keys before the first header into DEFAULT", "merges them with a later `[DEFAULT]` header",
+                 "first `=` or `:`", "no delimiter"):
+        assert fact in parser, fact
+    for fact in ("empty `[DEFAULT]` header", "`[__settings__]`", "`default_profile`"):
+        assert fact in configure, fact
+    for fact in ("same tests run against the real CLI when it's installed", "temporary folder as HOME",
+                 "neither reads the real `~/.databrickscfg`"):
+        assert fact in stand_in, fact
+
+
+def test_open_questions_name_the_default_profile_setting_the_bridge_ignores():
+    questions = section(AGENTS, "## Open questions")
+
+    assert "`[__settings__] default_profile`" in questions and "ignores" in questions
+    assert "`DATABRICKS_CONFIG_PROFILE`" in questions and "never picks a profile for the user" in questions
+    assert "None right now" not in questions
+    assert "New questions go to the director first" in questions
+
+
+def test_progress_md_lists_the_review_fixes_for_the_hidden_profile_the_missing_config_the_host_and_the_timeouts():
+    fixes = bullet(section(PROGRESS, "### The plugin (`plugins/databricks-genie/`)"), "- Review fixes (#33):")
+
+    for fact in ("reading only key names, never values", "at least one key", "An empty header", "`[DEFAULT]`",
+                 "keys before the first header count as DEFAULT's",
+                 "A machine with no config file is `not_configured` and can set up",
+                 "The profile's host decides where its token goes", "`GENIE_MCP_URL`", "only for a loopback URL",
+                 "cancel its running question first", "the request wasn't sent"):
+        assert fact in fixes, fact
+    assert "reading only section names" not in fixes
+
+
+def test_progress_md_records_the_contract_tests_that_run_the_stand_in_cli_and_the_real_one():
+    item = bullet(section(PROGRESS, "### Engineering setup"), "- ~~Contract tests for the Databricks CLI")
+
+    for fact in ("stand-in `databricks` CLI", "CLI v1.22.1", "the real CLI when it's installed", "temporary folder as HOME",
+                 "neither reads the real `~/.databrickscfg`"):
+        assert fact in item, fact
