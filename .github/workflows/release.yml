@@ -58,10 +58,12 @@ jobs:
             exit 1
           fi
           # Only a commit on main is released. The tests also run for a pushed tag, and then the event's branch is the
-          # tag's name, which can be "main" while the tag points at any commit. (Exit status 1 means "not an ancestor";
-          # anything else, such as a checkout without origin/main, is an error and stops the step.)
+          # tag's name, which can be "main" while the tag points at any commit. The branch is named in full because git
+          # reads a short origin/main as a tag of that name first, and a pushed tag called origin/main would stand in
+          # for it. (Exit status 1 means "not an ancestor"; anything else, such as a checkout without the branch, is an
+          # error and stops the step.)
           status=0
-          git merge-base --is-ancestor "$HEAD_SHA" origin/main || status=$?
+          git merge-base --is-ancestor "$HEAD_SHA" refs/remotes/origin/main || status=$?
           if [ "$status" -eq 1 ]; then
             echo "::notice title=Nothing to release::This commit is not on main."
             exit 0

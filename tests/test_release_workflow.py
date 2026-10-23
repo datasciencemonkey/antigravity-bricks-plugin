@@ -212,12 +212,20 @@ def test_never_edits_the_manifest_or_pushes_or_commits():
 def test_only_a_commit_that_is_on_main_is_released_and_that_is_checked_before_anything_is_read_or_asked():
     script = release_step(release_workflow())["run"]
 
-    ancestor = script.index('git merge-base --is-ancestor "$HEAD_SHA" origin/main')
+    ancestor = script.index('git merge-base --is-ancestor "$HEAD_SHA" refs/remotes/origin/main')
     for later in ("python3 tools/release_tag.py", "git rev-parse", "gh release view", "gh api", "gh release create"):
         assert ancestor < script.index(later), later
     after = script[ancestor:script.index("python3 tools/release_tag.py")]
     assert "-eq 1" in after and "exit 0" in after  # not an ancestor: skip
     assert "exit \"$status\"" in after  # any other failure (no origin/main, a bad object) stops the step
+
+
+def test_the_branch_to_compare_with_is_named_in_full_so_that_no_tag_can_stand_in_for_it():
+    script = release_step(release_workflow())["run"]
+    commands = "\n".join(line for line in script.splitlines() if not line.strip().startswith("#"))  # without the comments
+
+    assert "refs/remotes/origin/main" in commands
+    assert not re.search(r"(?<!refs/remotes/)\borigin/main", commands)  # git reads a bare origin/main as a tag first
 
 
 def test_the_commit_from_the_event_is_checked_to_be_a_full_sha_before_git_gets_it():
@@ -563,6 +571,34 @@ def test_a_commit_that_is_not_on_main_is_skipped_with_a_notice(checkout_dir):
     assert checkout_dir.gh_calls() == []
     (notice,) = [line for line in result.stdout.splitlines() if line.startswith("::notice")]
     assert "main" in notice and side not in notice
+
+
+def test_tags_named_like_the_branch_cannot_stand_in_for_it(checkout_dir):
+    # git reads a short `origin/main` as the tag refs/tags/origin/main before the branch refs/remotes/origin/main.
+    # Someone who can push tags could put `main` and `origin/main` on a commit that is not on main, and the step would
+    # then tag and release that commit, running its own scripts with the token.
+    side = checkout_dir.commit_off_main()
+    checkout_dir.repo.git("tag", "main", side)
+    checkout_dir.repo.git("tag", "origin/main", side)
+    assert checkout_dir.repo.git("rev-parse", "origin/main") == side  # the short name is shadowed, as the attack needs
+
+    result = checkout_dir.run(head_sha=side)
+
+    assert result.returncode == 0, result.stderr
+    assert checkout_dir.gh_calls() == []
+    (notice,) = [line for line in result.stdout.splitlines() if line.startswith("::notice")]
+    assert "not on main" in notice
+
+
+def test_a_commit_on_main_is_still_released_while_such_tags_exist(checkout_dir):
+    side = checkout_dir.commit_off_main()
+    checkout_dir.repo.git("tag", "main", side)
+    checkout_dir.repo.git("tag", "origin/main", side)
+
+    result = checkout_dir.run()  # the commit main points at
+
+    assert result.returncode == 0, result.stderr
+    assert len(checkout_dir.creates()) == 1
 
 
 def test_a_commit_that_main_has_moved_past_is_still_released(checkout_dir):
