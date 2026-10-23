@@ -9,6 +9,7 @@ import json
 import os
 import queue
 import re
+import shutil
 import signal
 import socket
 import stat
@@ -114,19 +115,40 @@ def genie():
     fake.server.shutdown()
 
 
-# A stand-in `databricks` CLI. Its profiles live in $FAKE_PROFILES, one "name host auth_type" line each: `auth login`
-# writes one, and `auth profiles` and `auth token` read them. Like the real CLI, `auth token` works only for U2M
-# (databricks-cli) profiles, and `auth login` rewrites an existing profile as databricks-cli, which drops a token or
-# client secret. It accepts only the flags the bridge should pass, records each call in $FAKE_CLI_CALLS, and hands out
-# the comma-separated $FAKE_TOKENS in order. FAKE_CLI_FAIL makes `auth token` fail as an expired sign-in does,
+# A stand-in `databricks` CLI that keeps its profiles in the config file, $DATABRICKS_CONFIG_FILE (else ~/.databrickscfg),
+# and reads that file the way CLI v1.22.1 does, which the tests below check against the real CLI wherever it's installed.
+# `auth profiles` lists only the sections that have a host or an account_id, so a section with neither (an Azure service
+# principal that sets azure_workspace_resource_id, or the empty [DEFAULT] header that `databricks configure` writes) is in
+# the file and never listed; keys before the first header belong to DEFAULT; and a missing or unreadable file is an error,
+# while an empty one lists nothing. `auth token` works only for U2M (databricks-cli) profiles. `auth login` rewrites the
+# section it signs in with a host and databricks-cli, which keeps none of its other keys: that is how a client secret is
+# lost. It accepts only the flags the bridge should pass, records each call in $FAKE_CLI_CALLS, and hands out the
+# comma-separated $FAKE_TOKENS in order. FAKE_CLI_FAIL makes `auth token` fail as an expired sign-in does,
 # FAKE_PROFILES_FAIL breaks `auth profiles`, and FAKE_LOGIN_SECONDS and FAKE_LOGIN_FAIL shape `auth login`.
-# The config file, $DATABRICKS_CONFIG_FILE, holds sections the CLI hides. CLI v1.22.1's `auth profiles` lists only a
-# section that has a host or an account_id, so one with neither (an Azure service principal that sets
-# azure_workspace_resource_id) is in the config file and never in $FAKE_PROFILES. `auth login` rewrites the section it
-# signs in, as the real CLI does, keeping none of its other keys: that is how a client secret is lost.
 FAKE_CLI = r"""#!/bin/sh
 echo "$@" >> "$FAKE_CLI_CALLS"
 fail() { echo "Error: $*" >&2; exit 1; }
+config="${DATABRICKS_CONFIG_FILE:-~/.databrickscfg}"
+case "$config" in "~"*) config="$HOME${config#"~"}" ;; esac
+need_config() { [ -f "$config" ] || fail "cannot parse config file: no configuration file found at $config; please create one by running 'databricks auth login'"; }
+# The config file as section<TAB>key<TAB>value lines, read like the real CLI's INI parser: keys before the first header
+# belong to DEFAULT, # and ; start a comment, the first = or : ends a key, and a name between [ and ] keeps its spaces.
+ini() {
+  awk '
+    BEGIN { section = "DEFAULT" }
+    { sub(/\r$/, ""); line = $0; sub(/^[ \t]+/, "", line); sub(/[ \t]+$/, "", line) }
+    line == "" || line ~ /^[#;]/ { next }
+    line ~ /^\[/ { section = substr(line, 2); sub(/\].*$/, "", section); next }
+    {
+      cut = index(line, "="); colon = index(line, ":")
+      if (cut == 0 || (colon > 0 && colon < cut)) cut = colon
+      key = substr(line, 1, cut - 1); value = substr(line, cut + 1)
+      sub(/[ \t]+$/, "", key); sub(/^[ \t]+/, "", value)
+      printf "%s\t%s\t%s\n", section, key, value
+    }
+  ' "$config"
+}
+field() { ini | awk -F'\t' -v s="$1" -v k="$2" '$1 == s && $2 == k { value = $3 } END { print value }'; }
 command="$1 $2"
 shift 2
 host="" profile="" output="" timeout="" skip=""
@@ -150,14 +172,24 @@ case "$command" in
 "auth profiles")
   [ -n "$skip" ] && [ "$output" = json ] && [ -z "$host$profile$timeout" ] || fail "unexpected flags for $command"
   [ -z "$FAKE_PROFILES_FAIL" ] || fail "cannot parse config file"
-  if [ ! -s "$FAKE_PROFILES" ]; then echo '{"profiles":null}'; exit 0; fi
-  printf '{"profiles":['
-  separator=""
-  while read -r name url auth; do
-    printf '%s{"name":"%s","host":"%s","auth_type":"%s","valid":false}' "$separator" "$name" "$url" "$auth"
-    separator=","
-  done < "$FAKE_PROFILES"
-  echo ']}'
+  need_config
+  ini | awk -F'\t' '
+    !($1 in known) { known[$1] = 1; names[++count] = $1 }
+    $2 == "host" { host[$1] = $3 }
+    $2 == "account_id" { account[$1] = $3 }
+    $2 == "auth_type" { auth[$1] = $3 }
+    END {
+      listed = 0
+      for (i = 1; i <= count; i++) {
+        name = names[i]
+        if (host[name] == "" && account[name] == "") continue
+        printf "%s{\"name\":\"%s\",", (listed ? "," : "{\"profiles\":["), name
+        if (host[name] != "") printf "\"host\":\"%s\",", host[name]
+        printf "\"auth_type\":\"%s\",\"valid\":false}", auth[name]
+        listed++
+      }
+      print (listed ? "]}" : "{\"profiles\":null}")
+    }'
   ;;
 "auth login")
   [ -n "$host" ] && [ -n "$profile" ] && [ -z "$output$skip" ] || fail "unexpected flags for $command"
@@ -167,25 +199,24 @@ case "$command" in
   echo "Waiting for the browser" >&2
   sleep "${FAKE_LOGIN_SECONDS:-0}"
   [ -z "$FAKE_LOGIN_FAIL" ] || fail "the sign-in was cancelled"
-  grep -v "^$profile " "$FAKE_PROFILES" > "$FAKE_PROFILES.new" 2>/dev/null
-  mv "$FAKE_PROFILES.new" "$FAKE_PROFILES"
-  echo "$profile $host databricks-cli" >> "$FAKE_PROFILES"
-  if [ -n "$DATABRICKS_CONFIG_FILE" ]; then
-    if [ -f "$DATABRICKS_CONFIG_FILE" ]; then
-      awk -v header="[$profile]" '/^[ \t]*\[/ { skipping = ($0 == header) } !skipping' "$DATABRICKS_CONFIG_FILE" > "$DATABRICKS_CONFIG_FILE.new"
-    else
-      : > "$DATABRICKS_CONFIG_FILE.new"
-    fi
-    printf '[%s]\nhost = %s\nauth_type = databricks-cli\n\n' "$profile" "$host" >> "$DATABRICKS_CONFIG_FILE.new"
-    mv "$DATABRICKS_CONFIG_FILE.new" "$DATABRICKS_CONFIG_FILE"
+  if [ -f "$config" ]; then
+    awk -v target="$profile" '
+      BEGIN { skipping = (target == "DEFAULT") }
+      /^[ \t]*\[/ { name = $0; sub(/^[ \t]*\[/, "", name); sub(/\].*$/, "", name); skipping = (name == target); if (skipping) next }
+      !skipping
+    ' "$config" > "$config.new"
+  else
+    : > "$config.new"
   fi
+  printf '[%s]\nhost = %s\nauth_type = databricks-cli\n\n' "$profile" "$host" >> "$config.new"
+  mv "$config.new" "$config"
   echo "Profile $profile was successfully saved"
   ;;
 "auth token")
   [ -n "$profile" ] && [ "$output" = json ] && [ -z "$host$timeout$skip" ] || fail "unexpected flags for $command"
-  line=$(grep "^$profile " "$FAKE_PROFILES" 2>/dev/null)
-  [ -n "$line" ] || fail "has no $profile profile configured"
-  [ "$(echo "$line" | cut -d' ' -f3)" = databricks-cli ] || fail "auth token only works with U2M (databricks-cli) profiles"
+  need_config
+  [ -n "$(field "$profile" host)" ] || fail "has no $profile profile configured"
+  [ "$(field "$profile" auth_type)" = databricks-cli ] || fail "auth token only works with U2M (databricks-cli) profiles"
   [ -z "$FAKE_CLI_FAIL" ] || fail "refresh token is invalid"
   echo >> "$FAKE_CLI_CALLS.tokens"
   n=$(grep -c "" "$FAKE_CLI_CALLS.tokens")
@@ -207,8 +238,7 @@ class CliScript:
         self.path.write_text(FAKE_CLI)
         self.path.chmod(0o755)
         self.log = folder / "cli-calls"
-        self.store = folder / "cli-profiles"
-        self.config = folder / "databrickscfg"  # the CLI's config file; the bridge reads its section names
+        self.config = folder / "databrickscfg"  # the CLI's config file, which the bridge also reads
         self.home = folder / "home"  # the bridge's home folder
         self.records = self.home / ".cache" / "antigravity-databricks-genie"  # where it records a sign-in in progress
         self.tmp = folder / "tmp"  # the bridge's temp folder, which must stay empty
@@ -216,17 +246,17 @@ class CliScript:
         self.tmp.mkdir()
         self.set_profiles({"DEMO": WORKSPACE, "DEFAULT": WORKSPACE})
 
-    def set_profiles(self, profiles):
-        """Each profile maps to its host (a U2M profile) or to (host, auth type)."""
-        lines = []
+    def set_profiles(self, profiles, extra=""):
+        """Write the config file. Each profile maps to its host (a U2M profile) or to (host, auth type); extra is raw text after
+        them, such as a section the CLI doesn't list."""
+        sections = []
         for name, value in profiles.items():
             host, auth_type = value if isinstance(value, tuple) else (value, "databricks-cli")
-            lines.append(f"{name} {host} {auth_type}\n")
-        self.store.write_text("".join(lines))
+            sections.append(f"[{name}]\nhost = {host}\n" + (f"auth_type = {auth_type}\n" if auth_type else "") + "\n")
+        self.config.write_text("".join(sections) + extra)
 
     def set_config(self, text):
-        """Put text in the config file. The fake `auth profiles` lists only $FAKE_PROFILES, so a section that is in the config
-        file and not in the profiles is one the CLI hides."""
+        """Put raw text in the config file."""
         self.config.write_text(text)
 
     def login_records(self):
@@ -239,7 +269,7 @@ class CliScript:
         return [line for line in self.calls() if line.startswith("auth login")]
 
     def env(self):
-        return {"DATABRICKS_CLI": str(self.path), "FAKE_CLI_CALLS": str(self.log), "FAKE_PROFILES": str(self.store),
+        return {"DATABRICKS_CLI": str(self.path), "FAKE_CLI_CALLS": str(self.log),
                 "DATABRICKS_CONFIG_FILE": str(self.config), "HOME": str(self.home), "TMPDIR": str(self.tmp)}
 
 
@@ -252,12 +282,17 @@ def cli_calls(cli):
     return cli.calls()
 
 
+def without_databricks_variables(environ):
+    """The environment with every DATABRICKS_* variable removed, so a variable of the developer's shell can't reach a test."""
+    return {key: value for key, value in environ.items() if not key.startswith("DATABRICKS_")}
+
+
 class Bridge:
     def __init__(self, genie, cli, new_session=False, **env):
         self.process = subprocess.Popen(
             [PYTHON, str(BRIDGE)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             start_new_session=new_session,
-            env={**os.environ, "GENIE_MCP_URL": genie.url, "DATABRICKS_CONFIG_PROFILE": "DEMO", "DATABRICKS_HOST": "",
+            env={**without_databricks_variables(os.environ), "GENIE_MCP_URL": genie.url, "DATABRICKS_CONFIG_PROFILE": "DEMO",
                  "FAKE_TOKENS": "tok-1,tok-2", **cli.env(), **env},
         )
         self.lines = queue.Queue()
@@ -638,7 +673,7 @@ def test_genie_connection_lists_the_cli_profiles_when_its_own_is_not_set_up(star
 
 
 def test_genie_connection_handles_a_machine_with_no_cli_profiles_at_all(start, cli):
-    cli.set_profiles({})  # the real CLI prints {"profiles": null} when there's no config file
+    cli.set_profiles({})  # an empty config file: the real CLI prints {"profiles": null}
     bridge = start(DATABRICKS_CONFIG_PROFILE="NEW", GENIE_MCP_URL="")
     _, report = bridge.connection(3)
 
@@ -723,7 +758,7 @@ def test_first_use_sets_up_the_profile_then_connects_and_tells_antigravity_the_t
 
     assert started["status"] == "login_in_progress" and "browser" in started["next_step"]
     assert cli.logins() == [f"auth login --host {WORKSPACE} --profile NEW --timeout 5m"]
-    assert f"NEW {WORKSPACE}" in cli.store.read_text()
+    assert f"[NEW]\nhost = {WORKSPACE}\n" in cli.config.read_text()
     assert notifications == [LIST_CHANGED]
     assert report["status"] == "ready" and report["profile"] == "NEW"
     assert genie.requests[-1]["body"]["params"]["name"] == "genie_ask"
@@ -776,7 +811,7 @@ def test_the_sign_in_keeps_going_after_antigravity_stops_the_bridge(start, cli):
     os.killpg(bridge.process.pid, signal.SIGTERM)
     bridge.process.wait(timeout=10)
 
-    wait_for(lambda: "NEW " in cli.store.read_text())
+    wait_for(lambda: "[NEW]" in cli.config.read_text())
 
 
 def test_a_failed_or_cancelled_sign_in_is_reported_with_how_to_retry(start, cli):
@@ -802,7 +837,7 @@ def test_genie_setup_signs_an_expired_profile_in_again_to_its_own_workspace(star
 
 @pytest.mark.parametrize("expired", [False, True])
 def test_genie_setup_never_changes_a_profile_that_is_set_up_for_another_workspace(start, cli, expired):
-    before = cli.store.read_text()
+    before = cli.config.read_text()
     bridge = start(**({"FAKE_CLI_FAIL": "1"} if expired else {}))
     bridge.send(call("genie_setup", {"workspace_url": workspace("other-workspace")}))
     reply = bridge.reply()
@@ -811,7 +846,7 @@ def test_genie_setup_never_changes_a_profile_that_is_set_up_for_another_workspac
     assert reply["result"]["isError"] is True
     assert "never changes" in text_of(reply) and "DATABRICKS_CONFIG_PROFILE" in text_of(reply)
     assert cli.logins() == []
-    assert cli.store.read_text() == before
+    assert cli.config.read_text() == before
 
 
 def test_genie_setup_leaves_a_signed_in_profile_alone(start, cli):
@@ -1156,7 +1191,7 @@ def test_gives_subprocess_run_the_cli_timeout(monkeypatch):
 def test_a_profile_that_signs_in_another_way_is_reported_and_never_touched(start, genie, cli, auth_type):
     # `auth token` is U2M-only, and `auth login` would rewrite the profile and drop its token or client secret.
     cli.set_profiles({"DEMO": (WORKSPACE, auth_type)})
-    before = cli.store.read_text()
+    before = cli.config.read_text()
     bridge = start()
     _, report = bridge.connection(3)
     bridge.send(call("genie_setup", {"workspace_url": WORKSPACE}, number=4))
@@ -1170,7 +1205,7 @@ def test_a_profile_that_signs_in_another_way_is_reported_and_never_touched(start
         assert words in report["next_step"]
     assert setup["result"]["isError"] is True and "OAuth U2M" in text_of(setup)
     assert ask["result"]["isError"] is True and "unsupported_auth" in text_of(ask)
-    assert cli.logins() == [] and cli.store.read_text() == before
+    assert cli.logins() == [] and cli.config.read_text() == before
     assert genie.requests == []
 
 
@@ -1380,7 +1415,6 @@ def azure_service_principal(profile):
 @pytest.mark.parametrize("profile", ["NEW", "DEFAULT"])  # [DEFAULT] is the section that configparser leaves out of its list
 def test_genie_setup_never_signs_in_over_a_config_section_the_cli_does_not_list(start, cli, profile):
     # `auth login` would rewrite that section and drop its client secret.
-    cli.set_profiles({})
     cli.set_config(azure_service_principal(profile))
     before = cli.config.read_text()
     bridge = start(DATABRICKS_CONFIG_PROFILE=profile)
@@ -1394,8 +1428,7 @@ def test_genie_setup_never_signs_in_over_a_config_section_the_cli_does_not_list(
 
 
 def test_genie_connection_reports_a_profile_the_cli_does_not_list_but_the_config_file_holds(start, genie, cli):
-    cli.set_profiles({"dev": workspace("dev-workspace")})
-    cli.set_config(azure_service_principal("NEW"))
+    cli.set_profiles({"dev": workspace("dev-workspace")}, extra=azure_service_principal("NEW"))
     bridge = start(DATABRICKS_CONFIG_PROFILE="NEW")
     _, report = bridge.connection(3)
     bridge.send(call("genie_ask", {"question": "Revenue last quarter?"}, number=4))
@@ -1414,24 +1447,24 @@ def test_genie_connection_reports_a_profile_the_cli_does_not_list_but_the_config
 def test_looks_for_the_config_file_where_the_cli_does(start, cli, variable, name):
     # $DATABRICKS_CONFIG_FILE, with a leading ~ expanded to the home folder, else ~/.databrickscfg
     (cli.home / name).write_text(azure_service_principal("NEW"))
-    cli.set_profiles({})
     bridge = start(DATABRICKS_CONFIG_PROFILE="NEW", DATABRICKS_CONFIG_FILE=variable)
     _, report = bridge.connection(3)
 
     assert report["status"] == "profile_exists_unreadable"
 
 
-def test_a_config_file_that_cannot_be_read_counts_as_holding_the_profile(start, cli, tmp_path):
+def test_a_config_file_the_cli_cannot_read_is_an_error_that_says_to_run_auth_profiles_and_starts_no_sign_in(start, cli, tmp_path):
+    # The real CLI fails on a config file that is a folder, before the bridge gets as far as reading it itself.
     folder = tmp_path / "not-a-file"
     folder.mkdir()
-    cli.set_profiles({})
     bridge = start(DATABRICKS_CONFIG_PROFILE="NEW", DATABRICKS_CONFIG_FILE=str(folder))
-    _, report = bridge.connection(3)
+    bridge.send(call("genie_connection"))
+    connection = bridge.reply()
     bridge.send(call("genie_setup", {"workspace_url": WORKSPACE}, number=4))
     setup = bridge.reply()
     time.sleep(0.3)
 
-    assert report["status"] == "profile_exists_unreadable"
+    assert connection["result"]["isError"] is True and "databricks auth profiles" in text_of(connection)
     assert setup["result"]["isError"] is True
     assert cli.logins() == []
 
@@ -1446,15 +1479,6 @@ def test_genie_setup_still_signs_in_again_a_profile_the_cli_lists_when_the_confi
 
     assert report["status"] == "login_in_progress"
     assert cli.logins() == [f"auth login --host {WORKSPACE} --profile DEMO --timeout 5m"]
-
-
-def test_a_missing_config_file_holds_no_profile(start, cli):
-    cli.set_profiles({})
-    assert not cli.config.exists()
-    bridge = start(DATABRICKS_CONFIG_PROFILE="NEW")
-    _, report = bridge.connection(3)
-
-    assert report["status"] == "not_configured"
 
 
 def test_lists_only_the_section_names_in_a_config_file(tmp_path):
@@ -1646,3 +1670,92 @@ def test_a_genie_ask_that_was_never_sent_for_lack_of_time_just_says_to_try_again
 
     assert timeouts == [150, 80]  # opening the session used up the time, so the question itself was never sent
     assert "Try again" in message and "duplicate" not in message
+
+
+# Third review (#33): the stand-in CLI has to list profiles the way CLI v1.22.1 does. Every test below runs against the
+# stand-in and, when the Databricks CLI is installed, against the real one, in a temporary folder used as HOME with
+# DATABRICKS_CONFIG_FILE in it, so neither can read the real ~/.databrickscfg.
+
+
+REAL_CLI = shutil.which("databricks")
+
+
+@pytest.fixture(params=["stand-in", pytest.param("real", marks=pytest.mark.skipif(REAL_CLI is None, reason="the Databricks CLI isn't installed"))])
+def any_cli(request, cli):
+    return str(cli.path) if request.param == "stand-in" else REAL_CLI
+
+
+def run_cli(binary, cli, *args, **overrides):
+    """Run a databricks CLI on the config file in cli's temporary folder, with that folder as HOME and no DATABRICKS_*
+    variable but the config file, so it never touches the real configuration. overrides change the environment."""
+    env = {**without_databricks_variables(os.environ), "HOME": str(cli.home), "DATABRICKS_CONFIG_FILE": str(cli.config),
+           "FAKE_CLI_CALLS": str(cli.log), **overrides}
+    return subprocess.run([binary, *args], env=env, cwd=cli.home, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
+
+
+def listed_profiles(binary, cli, config):
+    cli.set_config(config)
+    result = run_cli(binary, cli, "auth", "profiles", "--skip-validate", "--output", "json")
+    assert result.returncode == 0, result.stderr
+    return [(profile["name"], profile.get("host")) for profile in json.loads(result.stdout)["profiles"] or []]
+
+
+# What `databricks configure --host <host> --profile dev` wrote into a new config file (CLI v1.22.1), token made up.
+CONFIGURE_LAYOUT = ("; The profile defined in the DEFAULT section is to be used as a fallback when no profile is explicitly "
+                    f"specified.\n[DEFAULT]\n\n[dev]\nhost = {WORKSPACE}\ntoken = made-up-token\n\n[__settings__]\ndefault_profile = dev\n")
+
+
+def headerless_service_principal():
+    return azure_service_principal("x").split("\n", 1)[1]  # the keys without the [x] header
+
+
+@pytest.mark.parametrize("config, expected", [
+    pytest.param(CONFIGURE_LAYOUT, [("dev", WORKSPACE)], id="configure writes an empty DEFAULT header"),
+    pytest.param(f"host = {WORKSPACE}\nauth_type = databricks-cli\n", [("DEFAULT", WORKSPACE)], id="keys before the first header are DEFAULT's"),
+    pytest.param(f"host = {WORKSPACE}\n[DEFAULT]\nauth_type = databricks-cli\n", [("DEFAULT", WORKSPACE)], id="and join the DEFAULT header's"),
+    pytest.param(headerless_service_principal(), [], id="service principal keys with no header"),
+    pytest.param(azure_service_principal("sp"), [], id="service principal with no host"),
+    pytest.param("[acct]\naccount_id = abc-123\n", [("acct", None)], id="an account_id alone is enough"),
+    pytest.param("[empty]\n\n[DEFAULT]\n# only a comment\n; and another\n", [], id="sections with no keys"),
+    pytest.param(f"[note] # a comment\nhost = {WORKSPACE}\n", [("note", WORKSPACE)], id="a comment after a header"),
+    pytest.param(f"[colon]\nhost: {WORKSPACE}\n", [("colon", WORKSPACE)], id="a colon as the delimiter"),
+    pytest.param(f"[crlf]\r\nhost = {WORKSPACE}\r\n", [("crlf", WORKSPACE)], id="CRLF line endings"),
+])
+def test_auth_profiles_lists_only_sections_with_a_host_or_an_account_id(any_cli, cli, config, expected):
+    assert listed_profiles(any_cli, cli, config) == expected
+
+
+@pytest.mark.parametrize("state, works", [("missing", False), ("a folder", False), ("empty", True)])
+def test_auth_profiles_fails_without_a_readable_config_file_and_lists_none_for_an_empty_one(any_cli, cli, state, works):
+    # A machine that never ran `databricks configure` or `auth login` has no config file, and the CLI fails on that.
+    cli.config.unlink(missing_ok=True)
+    if state == "a folder":
+        cli.config.mkdir()
+    if state == "empty":
+        cli.set_config("")
+    result = run_cli(any_cli, cli, "auth", "profiles", "--skip-validate", "--output", "json")
+
+    assert (result.returncode == 0) is works
+    if works:
+        assert json.loads(result.stdout) == {"profiles": None}
+
+
+@pytest.mark.parametrize("variable, name", [("", ".databrickscfg"), ("~/custom.cfg", "custom.cfg")])
+def test_the_config_file_is_the_variable_with_a_leading_tilde_expanded_else_the_one_in_the_home_folder(any_cli, cli, variable, name):
+    (cli.home / name).write_text(f"[dev]\nhost = {WORKSPACE}\n")
+    result = run_cli(any_cli, cli, "auth", "profiles", "--skip-validate", "--output", "json", DATABRICKS_CONFIG_FILE=variable)
+
+    assert result.returncode == 0, result.stderr
+    assert [profile["name"] for profile in json.loads(result.stdout)["profiles"]] == ["dev"]
+
+
+@pytest.mark.parametrize("config, profile", [
+    pytest.param("[NEW]\nazure_workspace_resource_id = /subscriptions/0/x\nazure_client_secret = made-up\n", "NEW", id="a section with no host"),
+    pytest.param("[DEFAULT]\n", "DEFAULT", id="an empty DEFAULT header"),
+    pytest.param(f"[dev]\nhost = {WORKSPACE}\nauth_type = databricks-cli\n", "NEW", id="another profile only"),
+])
+def test_auth_token_fails_for_a_profile_that_is_not_listed(any_cli, cli, config, profile):
+    cli.set_config(config)
+    result = run_cli(any_cli, cli, "auth", "token", "--profile", profile, "--output", "json")
+
+    assert result.returncode != 0 and result.stdout == ""
