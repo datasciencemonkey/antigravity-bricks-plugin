@@ -35,6 +35,14 @@ jobs:
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
+          # This workflow runs as it is on main, so a tests run that ends after it landed can fire it for an older
+          # commit, which has no release scripts. That commit predates releases: say so and stop, don't fail.
+          for script in tools/release_tag.py tools/release_notes.py; do
+            if [ ! -f "$script" ]; then
+              echo "::notice title=Nothing to release::$script is not in this commit, which predates the release scripts."
+              exit 0
+            fi
+          done
           TAG="$(python3 tools/release_tag.py)"
           if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
             echo "$TAG already exists; nothing to release."

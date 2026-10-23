@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -152,8 +153,16 @@ def test_the_notes_are_built_by_release_notes_py_and_reach_gh_only_as_a_file():
 
 def test_never_edits_the_manifest_or_pushes_or_commits():
     for script in run_scripts(release_workflow()):
-        for forbidden in ("plugin.json", "git commit", "git push", "git tag", "git add", "sed ", "> plugins"):
-            assert forbidden not in script, forbidden
+        for forbidden in (r"plugin\.json", r"git commit", r"git push", r"git tag", r"git add", r"\bsed\b", r"> plugins"):
+            assert not re.search(forbidden, script), forbidden
+
+
+def test_a_commit_without_the_release_scripts_is_skipped_with_a_notice_before_anything_else_runs():
+    script = release_step(release_workflow())["run"]
+
+    assert "::notice" in script and "exit 0" in script[script.index("::notice"):script.index("python3 tools/release_tag.py")]
+    for later in ("python3 tools/release_tag.py", "git rev-parse", "gh release view", "gh api", "gh release create"):
+        assert script.index("::notice") < script.index(later), later
 
 
 # The scripts below run the workflow's real shell script against a temporary checkout, with a stand-in for gh.
@@ -245,10 +254,29 @@ def test_a_new_version_gets_a_tag_and_a_release_at_the_tested_commit(checkout_di
     result = checkout_dir.run()
 
     assert result.returncode == 0, result.stderr
+    assert "::notice" not in result.stdout  # the scripts are there, so nothing is skipped
     (create,) = checkout_dir.creates()
     version = json.loads((REPO_ROOT / MANIFEST).read_text())["version"]
     assert create[:6] == ["release", "create", f"v{version}", "--target", checkout_dir.head, "--title"]
     assert create[6] == f"v{version}"
+
+
+@pytest.mark.parametrize("missing", ["tools/release_tag.py", "tools/release_notes.py", "tools"])
+def test_an_older_commit_without_the_release_scripts_is_skipped_with_a_notice_not_failed(missing, checkout_dir):
+    # This workflow runs from main, so a tests run that ends after it landed can fire it for a commit that predates it.
+    target = checkout_dir.repo.path / missing
+    if target.is_dir():
+        shutil.rmtree(target)
+    else:
+        target.unlink()
+    checkout_dir.head = checkout_dir.repo.commit("An older commit")
+
+    result = checkout_dir.run()
+
+    assert result.returncode == 0, result.stderr
+    assert checkout_dir.gh_calls() == []  # no tag looked up, no pull requests listed, nothing created
+    (notice,) = [line for line in result.stdout.splitlines() if line.startswith("::notice")]
+    assert (missing if missing != "tools" else "tools/release_tag.py") in notice
 
 
 def test_the_tag_is_v_plus_the_version_in_the_manifest_of_the_tested_commit(checkout_dir):
