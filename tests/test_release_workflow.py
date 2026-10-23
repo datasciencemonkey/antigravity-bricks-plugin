@@ -15,7 +15,7 @@ WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 RELEASE = WORKFLOWS / "release.yml"
 TESTS = WORKFLOWS / "tests.yml"
 MANIFEST = "plugins/databricks-genie/plugin.json"
-TOOLS = ["tools/__init__.py", "tools/release_tag.py"]
+TOOLS = ["tools/__init__.py", "tools/release_tag.py", "tools/release_notes.py"]
 
 COMPLETED_AND_GREEN = "github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'"
 HEAD_SHA = "${{ github.event.workflow_run.head_sha }}"
@@ -138,6 +138,18 @@ def test_creates_the_release_at_the_tested_commit_and_names_it_after_the_tag():
     assert re.search(r'gh release create "\$TAG" --target "\$HEAD_SHA" --title "\$TAG"', script)
 
 
+def test_the_notes_are_built_by_release_notes_py_and_reach_gh_only_as_a_file():
+    script = release_step(release_workflow())["run"]
+    create = next(line for line in script.splitlines() if "gh release create" in line)
+
+    assert 'gh api --paginate "repos/{owner}/{repo}/pulls?state=closed&base=main' in script
+    assert 'python3 tools/release_notes.py --pulls "$PULLS" --head "$HEAD_SHA" --output "$NOTES"' in script
+    assert '--notes-file "$NOTES"' in create and "--generate-notes" in create  # ours first, then GitHub's generated list
+    assert "--notes " not in create and "--notes=" not in create  # never the text itself on the command line
+    assert script.index("tools/release_notes.py") < script.index("gh release create")
+    assert re.fullmatch(r'NOTES="\$RUNNER_TEMP/[\w.-]+\.md"', next(line.strip() for line in script.splitlines() if line.strip().startswith("NOTES=")))
+
+
 def test_never_edits_the_manifest_or_pushes_or_commits():
     for script in run_scripts(release_workflow()):
         for forbidden in ("plugin.json", "git commit", "git push", "git tag", "git add", "sed ", "> plugins"):
@@ -149,12 +161,26 @@ def test_never_edits_the_manifest_or_pushes_or_commits():
 FAKE_GH = """#!/usr/bin/env python3
 import json, os, sys
 args = sys.argv[1:]
+notes = None
+if "--notes-file" in args:  # the real gh reads the file when it is called, so the stand-in does too
+    with open(args[args.index("--notes-file") + 1]) as handle:
+        notes = handle.read()
 with open(os.environ["FAKE_GH_LOG"], "a") as log:
-    log.write(json.dumps(args) + "\\n")
+    log.write(json.dumps({"args": args, "notes": notes}) + "\\n")
 if args[:2] == ["release", "view"]:
     sys.exit(0 if os.environ.get("FAKE_GH_RELEASE_EXISTS") == "1" else 1)
+if args[:1] == ["api"]:
+    sys.stdout.write(os.environ.get("FAKE_GH_PULLS", "[]"))
 sys.exit(0)
 """
+
+
+def pull(number, title, commit, body=None):
+    """One item of the JSON that `gh api repos/<owner>/<repo>/pulls` returns."""
+    return {
+        "number": number, "title": title, "body": body, "merged_at": f"2026-10-23T10:{number:02d}:00Z",
+        "merge_commit_sha": commit, "head": {"sha": commit},
+    }
 
 
 class Checkout:
@@ -169,6 +195,8 @@ class Checkout:
         fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
         self.log = tmp_path / "gh-calls.jsonl"
         self.log.write_text("")
+        self.runner_temp = tmp_path / "runner-temp"
+        self.runner_temp.mkdir()
         self.script = tmp_path / "release-step.sh"
         self.script.write_text(release_step(release_workflow())["run"])
         for name in TOOLS:
@@ -179,12 +207,15 @@ class Checkout:
         self.repo.write(MANIFEST, json.dumps({"name": "databricks-genie", "version": version}, indent=2) + "\n")
         self.head = self.repo.commit(f"Version {version}")
 
-    def run(self, head_sha=None, release_exists=False):
+    def run(self, head_sha=None, release_exists=False, pulls="[]"):
+        """Run the step. pulls is what the stand-in gh prints for `gh api`: JSON text, or a list to turn into it."""
         env = {
             **os.environ, **ISOLATED_GIT,
             "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
             "FAKE_GH_LOG": str(self.log), "FAKE_GH_RELEASE_EXISTS": "1" if release_exists else "0",
+            "FAKE_GH_PULLS": pulls if isinstance(pulls, str) else json.dumps(pulls),
             "GH_TOKEN": "not-a-real-token", "GH_REPO": "owner/repo", "HEAD_SHA": head_sha or self.head,
+            "RUNNER_TEMP": str(self.runner_temp),
         }
         # GitHub runs `run:` steps as `bash --noprofile --norc -eo pipefail {0}`.
         return subprocess.run(
@@ -192,11 +223,17 @@ class Checkout:
             cwd=self.repo.path, env=env, capture_output=True, text=True,
         )
 
-    def gh_calls(self):
+    def entries(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()]
+
+    def gh_calls(self):
+        return [entry["args"] for entry in self.entries()]
 
     def creates(self):
         return [call for call in self.gh_calls() if call[:2] == ["release", "create"]]
+
+    def create_entries(self):
+        return [entry for entry in self.entries() if entry["args"][:2] == ["release", "create"]]
 
 
 @pytest.fixture
@@ -261,15 +298,68 @@ def test_a_version_that_is_not_three_numbers_fails_the_step_and_creates_nothing(
     assert not (checkout_dir.repo.path / "pwned").exists()
 
 
-def test_a_hostile_head_sha_stays_one_argument_and_runs_nothing(checkout_dir):
-    hostile = "abc; touch pwned && echo $(id)"
+def test_a_head_sha_that_is_not_a_full_sha_stops_the_release_and_runs_nothing(checkout_dir):
+    hostile = "abc; touch canary && echo $(id)"
 
     result = checkout_dir.run(head_sha=hostile)
 
+    assert result.returncode != 0
+    assert checkout_dir.creates() == []
+    assert not (checkout_dir.repo.path / "canary").exists() and not (checkout_dir.runner_temp / "canary").exists()
+
+
+def test_the_release_gets_a_notes_file_of_the_pull_requests_merged_since_the_previous_tag(checkout_dir):
+    before = checkout_dir.head
+    checkout_dir.repo.git("tag", "v0.3.0")
+    checkout_dir.set_version("0.3.1")
+    pulls = [
+        pull(1, "Merged before the previous release", before, "## Summary\n- Old news.\n"),
+        pull(2, "Bump the version", checkout_dir.head, "## Summary\n- Fixes the thing.\n- Needs no setup.\n\n## Issues\nCloses #9\n"),
+    ]
+
+    result = checkout_dir.run(pulls=pulls)
+
     assert result.returncode == 0, result.stderr
-    (create,) = checkout_dir.creates()
-    assert create[create.index("--target") + 1] == hostile
-    assert not (checkout_dir.repo.path / "pwned").exists()
+    (entry,) = checkout_dir.create_entries()
+    args = entry["args"]
+    assert Path(args[args.index("--notes-file") + 1]).parent == checkout_dir.runner_temp
+    assert "--generate-notes" in args  # GitHub's own list follows ours
+    assert entry["notes"] == (
+        "## Pull requests since v0.3.0\n\n- Bump the version (#2)\n  - Fixes the thing.\n  - Needs no setup.\n"
+    )
+    assert [call[0] for call in checkout_dir.gh_calls()] == ["release", "api", "release"]  # view, the pulls, create
+
+
+def test_the_first_release_lists_every_merged_pull_request(checkout_dir):
+    pulls = [pull(1, "The first change", checkout_dir.head)]
+
+    result = checkout_dir.run(pulls=pulls)
+
+    assert result.returncode == 0, result.stderr
+    (entry,) = checkout_dir.create_entries()
+    assert entry["notes"] == "## Pull requests\n\n- The first change (#1)\n"
+
+
+def test_pull_request_text_reaches_the_notes_file_but_never_a_command_line_or_a_shell(checkout_dir):
+    hostile = "`touch canary` $(touch canary); touch canary # --title injected"
+    checkout_dir.set_version("0.3.1")
+    pulls = [pull(2, hostile, checkout_dir.head, f"## Summary\n- {hostile}\n")]
+
+    result = checkout_dir.run(pulls=pulls)
+
+    assert result.returncode == 0, result.stderr
+    (entry,) = checkout_dir.create_entries()
+    assert entry["notes"].count(hostile) == 2
+    for call in checkout_dir.gh_calls():
+        assert not any("canary" in argument or "injected" in argument for argument in call)
+    assert not (checkout_dir.repo.path / "canary").exists() and not (checkout_dir.runner_temp / "canary").exists()
+
+
+def test_pull_request_json_that_cannot_be_read_stops_the_release(checkout_dir):
+    result = checkout_dir.run(pulls='{"number": 1, "title": ')
+
+    assert result.returncode != 0
+    assert checkout_dir.creates() == []
 
 
 def test_the_run_changes_nothing_in_the_checkout(checkout_dir):
