@@ -347,13 +347,12 @@ def test_shell_metacharacters_in_a_bullet_come_through_as_the_same_text():
     assert bullets(f"## Summary\n- {SHELL}\n") == [SHELL]
 
 
-def test_shell_metacharacters_in_every_field_are_only_text_in_the_notes(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-
+def test_shell_metacharacters_in_every_field_come_through_as_the_same_text():
+    # That nothing runs them is the job of test_the_tool_never_goes_through_a_shell and of the workflow tests, which
+    # run the real step with a canary file that evaluating the text would create.
     notes = notes_for(pr(1, title=SHELL, body=f"## Summary\n- {SHELL}\n"))
 
     assert notes.count(SHELL) == 2
-    assert list(tmp_path.iterdir()) == []  # nothing ran and nothing was written
 
 
 MARKERS = [
@@ -643,15 +642,14 @@ def test_a_repository_that_is_not_owner_slash_name_fails_the_command_line(name, 
     assert capsys.readouterr().err.startswith("release_notes:")
 
 
-def test_hostile_text_is_written_as_text_and_nothing_runs(history, tmp_path):
-    repo, _, head = history
+def test_hostile_text_is_written_into_the_notes_file_as_the_same_text(history, tmp_path):
+    _, _, head = history
     hostile = pr(2, title=SHELL + " $(touch pwned)", body=f"## Summary\n- {SHELL}\n", commit=head)
 
     code, output = run(tmp_path, [hostile], head)
 
     assert code == 0
-    assert SHELL in output.read_text()
-    assert not (repo.path / "pwned").exists() and not (tmp_path / "pwned").exists()
+    assert output.read_text().count(SHELL) == 2
 
 
 @pytest.mark.parametrize("head", ["HEAD", "--all", "abc", "A" * 40, "0" * 40])

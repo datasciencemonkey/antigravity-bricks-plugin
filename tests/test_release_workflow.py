@@ -200,6 +200,7 @@ class Checkout:
     """A temporary checkout shaped like the runner's, and a way to run the workflow's release script in it."""
 
     def __init__(self, tmp_path):
+        self.root = tmp_path
         self.repo = TempRepo(tmp_path / "checkout")
         self.bin = tmp_path / "bin"
         self.bin.mkdir()
@@ -235,6 +236,10 @@ class Checkout:
             ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(self.script)],
             cwd=self.repo.path, env=env, capture_output=True, text=True,
         )
+
+    def ran_the_canary(self):
+        """Whether something ran `touch canary`. Hostile text in these tests tries that; the step runs in the checkout."""
+        return any((folder / "canary").exists() for folder in (self.repo.path, self.runner_temp, self.root))
 
     def entries(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()]
@@ -321,13 +326,13 @@ def test_a_tag_for_another_version_does_not_stop_a_new_version(checkout_dir):
 
 
 def test_a_version_that_is_not_three_numbers_fails_the_step_and_creates_nothing(checkout_dir):
-    checkout_dir.set_version("1.0.0; touch pwned")
+    checkout_dir.set_version("1.0.0; touch canary")
 
     result = checkout_dir.run()
 
     assert result.returncode != 0
     assert checkout_dir.gh_calls() == []
-    assert not (checkout_dir.repo.path / "pwned").exists()
+    assert not checkout_dir.ran_the_canary()
 
 
 def test_a_head_sha_that_is_not_a_full_sha_stops_the_release_and_runs_nothing(checkout_dir):
@@ -337,7 +342,7 @@ def test_a_head_sha_that_is_not_a_full_sha_stops_the_release_and_runs_nothing(ch
 
     assert result.returncode != 0
     assert checkout_dir.creates() == []
-    assert not (checkout_dir.repo.path / "canary").exists() and not (checkout_dir.runner_temp / "canary").exists()
+    assert not checkout_dir.ran_the_canary()
 
 
 def test_the_release_gets_a_notes_file_of_the_pull_requests_merged_since_the_previous_tag(checkout_dir):
@@ -400,7 +405,22 @@ def test_pull_request_text_reaches_the_notes_file_but_never_a_command_line_or_a_
     assert entry["notes"].count(hostile) == 2
     for call in checkout_dir.gh_calls():
         assert not any("canary" in argument or "injected" in argument for argument in call)
-    assert not (checkout_dir.repo.path / "canary").exists() and not (checkout_dir.runner_temp / "canary").exists()
+    assert not checkout_dir.ran_the_canary()
+
+
+def test_the_canary_check_does_notice_a_script_that_evaluates_pull_request_text(checkout_dir):
+    # The tests above look for the canary file after hostile text went through the step. This one proves the look can
+    # succeed: the same step with one careless line added, which evaluates the notes as shell, does create the file.
+    careless = checkout_dir.script.read_text().replace(
+        '--output "$NOTES"\n', '--output "$NOTES"\neval "$(cat "$NOTES")"\n', 1
+    )
+    assert 'eval "$(cat "$NOTES")"' in careless
+    checkout_dir.script.write_text(careless)
+    checkout_dir.set_version("0.3.1")
+
+    checkout_dir.run(pulls=[pull(2, "$(touch canary) #", checkout_dir.head)])
+
+    assert checkout_dir.ran_the_canary()
 
 
 def test_pull_request_json_that_cannot_be_read_stops_the_release(checkout_dir):
