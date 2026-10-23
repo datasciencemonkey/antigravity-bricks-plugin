@@ -1,4 +1,5 @@
 """The Databricks Genie plugin package: the files Antigravity 2.24.0 actually loads, and nothing it would drop or choke on."""
+import importlib.util
 import json
 import re
 import shutil
@@ -10,6 +11,10 @@ import yaml
 
 PLUGIN = Path(__file__).resolve().parent.parent / "plugins" / "databricks-genie"
 SKILL = "antigravity-databricks-genie"
+GENIE_ONE_TOOLS = ["genie_ask", "genie_poll_response", "genie_get_query_result", "genie_cancel_response"]
+STATUSES = ["ready", "not_configured", "login_needed", "login_in_progress", "login_failed", "cli_missing",
+            "unsupported_auth"]
+WORKSPACE_LINE = "Asking Genie in <host> (CLI profile <profile>)"
 # The 2.24.0 loader reads only these keys; `author` and `homepage` are silently dropped.
 LOADER_KEYS = {"name", "description", "displayName", "logo", "suggestedPrompts", "version", "disabled", "skills"}
 PLACEHOLDERS = {"PLUGIN_ROOT", "PLUGIN_DATA"}
@@ -142,3 +147,136 @@ def test_the_skill_says_to_poll_again_with_the_same_ids_when_a_poll_times_out():
     (step,) = [line.lower() for line in skill.splitlines() if "genie_poll_response" in line]
 
     assert "time" in step and "poll again" in step and "same" in step
+
+
+def skill_text():
+    return (PLUGIN / "skills" / SKILL / "SKILL.md").read_text()
+
+
+def rule_text():
+    return (PLUGIN / "rules" / "AGENTS.md").read_text()
+
+
+def readme_text():
+    return (PLUGIN / "README.md").read_text()
+
+
+def status_step(status):
+    """The skill's step for one genie_connection status: the list item that starts with it."""
+    (item,) = [line for line in skill_text().splitlines() if line.startswith(f"- `{status}`")]
+    return item
+
+
+def test_the_bundled_genie_tools_are_a_copy_of_genie_ones_four_tools():
+    # The bridge lists these before Genie One can be reached, so the tools show up before any sign-in.
+    tools = json.loads((PLUGIN / "scripts" / "genie_tools.json").read_text())
+
+    assert [tool["name"] for tool in tools] == GENIE_ONE_TOOLS
+    for tool in tools:
+        assert tool["description"].strip()
+        assert tool["inputSchema"]["type"] == "object" and tool["inputSchema"]["properties"]
+    assert tools[0]["inputSchema"]["required"] == ["question"]
+
+
+def test_the_bridge_reports_the_plugins_version():
+    spec = importlib.util.spec_from_file_location("genie_bridge", PLUGIN / "scripts" / "genie_bridge.py")
+    bridge = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bridge)
+
+    assert bridge.VERSION == manifest()["version"]
+
+
+def test_the_skill_checks_the_connection_once_per_conversation():
+    skill = skill_text()
+
+    assert "`genie_connection`" in skill and "once per conversation" in skill
+
+
+def test_the_skill_covers_every_status_genie_connection_reports():
+    for status in STATUSES:
+        assert status_step(status)
+
+
+def test_the_skill_shows_the_workspace_and_profile_before_each_genie_ask():
+    (step,) = [line for line in skill_text().splitlines() if "before each `genie_ask`" in line.lower()]
+
+    assert WORKSPACE_LINE in step
+
+
+def test_the_skill_asks_the_user_for_the_workspace_url_when_the_profile_is_not_set_up():
+    step = status_step("not_configured").lower()
+
+    assert "workspace url" in step and "never guess" in step and "browser" in step and "`genie_setup`" in step
+
+
+def test_the_skill_explains_the_cli_sign_in_the_first_time_it_asks_for_the_workspace_url():
+    # Users who already have the CLI never see the install ask, so they get the same short explanation here.
+    step = status_step("not_configured").lower()
+
+    assert "oauth u2m" in step and "safest" in step and "token" in step
+
+
+def test_the_skill_never_picks_a_profile_or_workspace_url_for_the_user():
+    assert "never pick a profile or a workspace url for the user" in skill_text().lower()
+
+
+def test_the_skill_asks_before_installing_the_databricks_cli():
+    step = status_step("cli_missing")
+    lower = step.lower()
+
+    assert "official installer" in lower and "may i install" in lower
+    assert "only after the user approves" in lower and "never install it silently" in lower
+    for command in ("brew install databricks/tap/databricks",
+                    "curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh",
+                    "winget install Databricks.DatabricksCLI"):
+        assert command in step
+
+
+def test_the_skills_install_step_says_the_cli_is_the_safest_way_to_run_oauth_u2m_locally():
+    step = status_step("cli_missing").lower()
+
+    assert "oauth u2m" in step and "safest" in step and "own machine" in step
+    assert "single sign-on" in step and "short-lived" in step
+
+
+def test_the_always_on_rule_checks_the_connection_and_shows_the_workspace_before_each_question():
+    rule = rule_text()
+
+    assert "`genie_connection`" in rule and "once per conversation" in rule
+    assert WORKSPACE_LINE in rule
+
+
+def test_the_always_on_rule_sets_up_a_missing_profile_without_picking_one():
+    rule = rule_text().lower()
+
+    assert "workspace url" in rule and "browser" in rule and "`genie_setup`" in rule
+    assert "never pick a profile or a workspace url for the user" in rule
+
+
+def test_the_always_on_rule_installs_the_cli_only_after_the_user_approves():
+    (line,) = [line for line in rule_text().splitlines() if "install" in line.lower()]
+    lower = line.lower()
+
+    assert "official installer" in lower and "only after the user approves" in lower and "oauth u2m" in lower
+
+
+def test_readme_explains_the_first_use_flow():
+    readme = readme_text()
+
+    assert "## First use" in readme
+    for words in ("`genie_connection`", "`genie_setup`", "workspace URL", "browser", "never changes"):
+        assert words in readme
+
+
+def test_readme_explains_how_to_switch_cli_profiles():
+    readme = readme_text()
+
+    assert "export DATABRICKS_CONFIG_PROFILE=<name>" in readme
+    assert "launchctl setenv DATABRICKS_CONFIG_PROFILE <name>" in readme
+    assert "launchctl unsetenv DATABRICKS_CONFIG_PROFILE" in readme
+
+
+def test_the_skill_leaves_a_profile_that_signs_in_another_way_alone():
+    step = status_step("unsupported_auth")
+
+    assert "OAuth U2M" in step and "DATABRICKS_CONFIG_PROFILE" in step and "never" in step.lower()

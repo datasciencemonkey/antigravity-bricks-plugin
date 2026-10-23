@@ -2,7 +2,7 @@
   "name": "databricks-genie",
   "displayName": "Databricks Genie",
   "description": "Ask Databricks Genie about your governed data from Antigravity and turn its answers and SQL into code. Signs in with your Databricks CLI.",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
     "Ask Genie which products drove the most revenue, and show the SQL it ran",

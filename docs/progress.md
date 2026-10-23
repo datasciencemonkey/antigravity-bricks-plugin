@@ -1,6 +1,6 @@
 # Progress: the Databricks Genie plugin for Google Antigravity
 
-As of 2026-10-22. Finished items are crossed out; issue numbers refer to the [project board](https://github.com/users/datasciencemonkey/projects/4).
+As of 2026-10-23. Finished items are crossed out; issue numbers refer to the [project board](https://github.com/users/datasciencemonkey/projects/4).
 
 ## Features and to-dos
 
@@ -10,7 +10,12 @@ As of 2026-10-22. Finished items are crossed out; issue numbers refer to the [pr
 - ~~A local Genie bridge: a small Python MCP server (standard library only, Python 3.9+) that Antigravity starts, which forwards every call to the Genie One MCP (#11). It began as Node and moved to Python on 2026-10-21, because Antigravity doesn't give plugin servers its bundled Node and every developer machine already has `python3`.~~
 - ~~Sign-in through the Databricks CLI login: a fresh token on each request, cached until shortly before it expires, one retry if Genie rejects it, and never stored or printed (#8, #11). This is U2M OAuth (`databricks auth login`), brokered by the CLI. The user chose on 2026-10-21 to keep it; Antigravity's own OAuth waits for a published Databricks app for Antigravity or client ID metadata document support (#22).~~
 - ~~No settings to fill in: the workspace comes from the CLI profile, `DEFAULT` unless `DATABRICKS_CONFIG_PROFILE` says otherwise (#21). The user chose to keep this as the design on 2026-10-21.~~
-- README: explain how to point the desktop app at another profile (`launchctl setenv DATABRICKS_CONFIG_PROFILE <name>`, then restart the app)
+- README: explain how to point the desktop app at another profile (`launchctl setenv DATABRICKS_CONFIG_PROFILE <name>`, then restart the app). The commands are in the README since #33; they still need checking with a second profile the user picks.
+- First use with no CLI profile (#33): the bridge answers `initialize` and `tools/list` itself, with a bundled copy of Genie One's four tool schemas, so the tools show up before any sign-in. `genie_connection` reports the status, the CLI profile and the host the bridge will call. `genie_setup` takes the workspace URL the user gives (Databricks workspace domains only) and runs `databricks auth login` in the background, never pointing an existing profile at another workspace. When the CLI is missing, the agent offers Databricks' official installer and runs it only after the user approves. Built test-first; still to be shown working in the CLI, the desktop app and the IDE.
+- The workspace line (#33): before each `genie_ask` the agent says "Asking Genie in <host> (CLI profile <profile>)", and the bridge adds the same line to each `genie_ask` result.
+- Hardening in the bridge (#33): clear errors for a missing CLI, a cancelled or failed sign-in, HTTP 403 (an IP access list or VPN), HTTP 404 (Genie One not available) and an unreachable workspace; every call ends within 160 s; a new Genie session when Genie ends the old one; no error text that could quote a token.
+- Review fixes (#33):
+  - A profile that signs in another way (a personal access token or a service principal) is reported as `unsupported_auth`, and `genie_setup` never signs it in again, which would drop its token or secret.
 - ~~Finds the Databricks CLI even when Antigravity starts the bridge with a bare PATH (#21)~~
 - ~~An `antigravity-databricks-genie` skill (renamed from `genie` on 2026-10-22, #26): ask, wait for the answer, fetch full results, follow up in the same conversation, put Genie's SQL into code, and fall back to the CLI (#11)~~
 - ~~The bridge waits up to 150 s for Genie, so it gives up before Antigravity's 3-minute limit on each tool call, and the skill says to poll again with the same IDs (#26, #28). The wait was 120 s, which timed out a slow poll, then 300 s, which outlasted Antigravity's limit.~~
@@ -67,9 +72,9 @@ As of 2026-10-22. Finished items are crossed out; issue numbers refer to the [pr
 ### How a question flows
 
 1. The Antigravity agent reads the `antigravity-databricks-genie` skill.
-2. It calls `call_mcp_tool` on `databricks-genie_genie`, the local bridge.
-3. The bridge gets a token from `databricks auth token`, for the `DEFAULT` profile unless one is set.
-4. The bridge posts the call to the Genie One MCP in the workspace.
+2. It calls `genie_connection` with `call_mcp_tool` on `databricks-genie_genie`, the local bridge, once per conversation. If the CLI profile (`DEFAULT` unless one is set) isn't set up, it asks the user for the workspace URL and calls `genie_setup`, and the user signs in in the browser.
+3. Before each question, it tells the user "Asking Genie in <host> (CLI profile <profile>)".
+4. The bridge gets a token from `databricks auth token` and posts the call to the Genie One MCP in the workspace.
 5. Genie finds the data, runs SQL on a SQL warehouse, and answers.
 6. The agent polls until the answer is ready, then shows the numbers, Genie's SQL, and links back to Databricks.
 
