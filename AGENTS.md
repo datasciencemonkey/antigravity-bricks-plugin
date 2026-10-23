@@ -12,13 +12,13 @@ Deliverables, in order:
 
 Work is tracked as issues on the [project board](https://github.com/users/datasciencemonkey/projects/4).
 
-## Status (2026-10-22)
+## Status (2026-10-23)
 
 - Done: read the plugin guide (`Antigravity Plugin Marketplace Publishing Guide.pdf`, repo root, git-ignored) (#1); research on Antigravity (#2), Databricks (#3), and the ecosystem (#4); this file (#19); the director subagent (#20); tests and the push gate (#23); the Genie plugin at `plugins/databricks-genie/` (#11); the spike (#21); the demo setup (#10); the upstream check against `databricks/databricks-agent-skills` (#25).
 - Working: Genie answers through the plugin in the Antigravity CLI (`agy -p`) and in the desktop app (#12), which was re-verified with the Python bridge on 2026-10-22. The IDE app is untested.
 - Decided: the first user and their first question (#5); sign-in (#8, with #14 folded in).
-- In progress: the POV draft is waiting for the user's review (#6); the standalone-connector batch (#26).
-- Next: scope (#7), then the hardening follow-ups (#24).
+- In progress: the MVP (#33, #34, #30); see Decisions.
+- Parked for later (the user, 2026-10-23): the non-Genie work, labeled `later` on the board. That's the POV (#6), scope (#7), the design doc (#9), and #13, #15, #18, #22 and #24.
 
 ## What we know
 
@@ -64,6 +64,7 @@ Work is tracked as issues on the [project board](https://github.com/users/datasc
 - Demo setup (#10, decided by the user): the `DEFAULT` CLI profile (a serverless FEVM workspace), with a new Genie space to be created over its sample data. Installing `agy` and running the spike (#21) are approved.
 - Standalone connector (#25, #26, decided by the user on 2026-10-22): the plugin is a standalone way to connect Antigravity to Databricks Genie. It doesn't assume other Databricks skills are installed, and it doesn't bundle Databricks' published skills. There's no upstream work in `databricks/databricks-agent-skills`. The skill is renamed `antigravity-databricks-genie`, so its slash command is `/antigravity-databricks-genie`; the MCP server key stays `genie` (`databricks-genie_genie`). The bridge waits up to 150 s for Genie, so it gives up before Antigravity's 3-minute per-call limit (#28). The plugin is version 0.2.1.
 - Start with Antigravity (the user, 2026-10-22): other IDE targets, such as one repo for Claude Code, Cursor and Antigravity (#13), are parked.
+- MVP (the user, 2026-10-23): the plugin works from the `agy` CLI, the desktop app and the IDE. On every surface, if the CLI profile isn't configured, the agent asks the user for their workspace details, uses them to set up the CLI profile, then uses that profile to connect to the Genie MCP server. Before each Genie request, it shows the workspace host and profile. It's hardened and checked against the publishing guide (#33, #34, #30).
 
 ## Open questions
 
