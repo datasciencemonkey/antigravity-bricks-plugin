@@ -1793,41 +1793,75 @@ def test_checking_the_connection_creates_no_folder(start, cli):
 
 
 def never_answers_tool_calls(monkeypatch, bridge, how):
-    """Replace urlopen with a Genie that answers everything but tools/call: that either hangs or ends in a socket timeout."""
+    """Replace urlopen with a Genie that answers everything but tools/call: that hangs, ends in a socket timeout while the
+    reply is awaited (the request was sent), or ends in one while connecting (it was not)."""
     def urlopen(request, timeout=None):
         if json.loads(request.data)["method"] == "tools/call":
             if how == "socket":
                 raise socket.timeout("timed out")
+            if how == "connect":
+                raise urllib.error.URLError(socket.timeout("timed out"))
             time.sleep(5)
         return FakeResponse()
 
     monkeypatch.setattr(bridge.urllib.request, "urlopen", urlopen)
 
 
+def message_after_a_timeout(monkeypatch, capsys, loaded, how, name, arguments):
+    context = short_limit(loaded, monkeypatch, {"GENIE_MCP_URL": LOOPBACK}, 2)
+    never_answers_tool_calls(monkeypatch, loaded, how)
+    loaded.handle(json.dumps(call(name, arguments)), context)
+    reply = json.loads(capsys.readouterr().out)
+
+    assert reply["result"]["isError"] is True
+    return text_of(reply)
+
+
 @pytest.mark.parametrize("how", ["hangs", "socket"])
 def test_a_genie_ask_that_times_out_says_asking_again_starts_a_duplicate_question(monkeypatch, capsys, loaded, how):
     # Genie keeps working on a question after the bridge gives up, and the IDs it would have sent back are lost.
-    context = short_limit(loaded, monkeypatch, {"GENIE_MCP_URL": LOOPBACK}, 2)
-    never_answers_tool_calls(monkeypatch, loaded, how)
-    loaded.handle(json.dumps(call("genie_ask", {"question": "Revenue last quarter?"})), context)
-    reply = json.loads(capsys.readouterr().out)
-    message = text_of(reply)
+    message = message_after_a_timeout(monkeypatch, capsys, loaded, how, "genie_ask", {"question": "Revenue last quarter?"})
 
-    assert reply["result"]["isError"] is True
     assert "duplicate" in message and "wait" in message.lower()
-    assert "same IDs" not in message  # no IDs came back to poll with
+    assert "same IDs" not in message and "genie_cancel_response" not in message  # no IDs, and no conversation to cancel
 
 
 @pytest.mark.parametrize("how", ["hangs", "socket"])
-@pytest.mark.parametrize("name", ["genie_poll_response", "genie_get_query_result"])
-def test_a_call_that_has_ids_and_times_out_gives_them_back_for_polling(monkeypatch, capsys, loaded, how, name):
-    context = short_limit(loaded, monkeypatch, {"GENIE_MCP_URL": LOOPBACK}, 2)
-    never_answers_tool_calls(monkeypatch, loaded, how)
-    loaded.handle(json.dumps(call(name, {**POLL, "item_id": "i-1"})), context)
-    message = text_of(json.loads(capsys.readouterr().out))
+def test_a_follow_up_that_times_out_suggests_cancelling_it_before_asking_again(monkeypatch, capsys, loaded, how):
+    message = message_after_a_timeout(monkeypatch, capsys, loaded, how, "genie_ask",
+                                      {"question": "By region?", "conversation_id": "c-1"})
+
+    assert "duplicate" in message
+    assert "genie_cancel_response" in message and "conversation_id c-1" in message
+    assert message.index("genie_cancel_response") < message.lower().index("try again")  # cancel first, then ask
+
+
+@pytest.mark.parametrize("how", ["hangs", "socket"])
+def test_a_poll_that_times_out_gives_its_ids_back_for_polling(monkeypatch, capsys, loaded, how):
+    message = message_after_a_timeout(monkeypatch, capsys, loaded, how, "genie_poll_response", POLL)
 
     assert "genie_poll_response" in message and "conversation_id c-1" in message and "response_id r-1" in message
     assert "duplicate" in message
+
+
+@pytest.mark.parametrize("how", ["hangs", "socket"])
+@pytest.mark.parametrize("name, arguments", [
+    pytest.param("genie_get_query_result", {**POLL, "item_id": "i-1"}, id="fetching a result"),
+    pytest.param("genie_cancel_response", {"conversation_id": "c-1"}, id="cancelling"),
+])
+def test_a_call_that_starts_no_question_just_says_to_try_again_when_it_times_out(monkeypatch, capsys, loaded, how, name, arguments):
+    # Fetching a result or cancelling is no new question: nothing to poll for, and no duplicate to warn about.
+    message = message_after_a_timeout(monkeypatch, capsys, loaded, how, name, arguments)
+
+    assert "Try again" in message
+    assert "duplicate" not in message and "genie_poll_response" not in message and "genie_cancel_response" not in message
+
+
+def test_a_timeout_while_connecting_says_the_request_was_not_sent_and_warns_of_no_duplicate(monkeypatch, capsys, loaded):
+    message = message_after_a_timeout(monkeypatch, capsys, loaded, "connect", "genie_ask", {"question": "Revenue last quarter?"})
+
+    assert "wasn't sent" in message and "VPN" in message and "try again" in message.lower()
+    assert "duplicate" not in message
 
 
 def test_a_genie_ask_that_was_never_sent_for_lack_of_time_just_says_to_try_again(monkeypatch, capsys, loaded):

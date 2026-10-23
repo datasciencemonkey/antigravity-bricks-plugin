@@ -636,18 +636,24 @@ def exchange(request, timeout):
 
 def late_text(message, seconds):
     """What to tell the agent when Genie didn't answer message in time. The request may have reached Genie, which keeps working
-    on a question after the bridge gives up, so asking again starts a duplicate. A call that carried the IDs of its answer gets
-    them back for polling; a question that was just asked has none, because they come in the reply that never arrived."""
+    on a question after the bridge gives up, so asking again starts a duplicate. A poll gets its IDs back to poll again with. A
+    question that was just asked has none, because they come in the reply that never arrived; a follow-up has its conversation,
+    which can be cancelled first. Fetching a result or cancelling starts nothing, so those just say to try again."""
     params = message.get("params") if isinstance(message.get("params"), dict) else {}
     arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
-    ids = (arguments.get("conversation_id"), arguments.get("response_id"))
+    conversation, response = (value if isinstance(value, str) and value else None
+                              for value in (arguments.get("conversation_id"), arguments.get("response_id")))
     text = "Genie didn't answer within {} seconds, so this call ran out of time.".format(seconds)
-    if all(isinstance(value, str) and value for value in ids):
+    if params.get("name") == "genie_poll_response" and conversation and response:
         return text + (" Genie may still be working on it, and asking the question again would start a duplicate: call "
-                       "genie_poll_response again with conversation_id {} and response_id {}.".format(*ids))
+                       "genie_poll_response again with conversation_id {} and response_id {}.".format(conversation, response))
     if params.get("name") == "genie_ask":
-        return text + (" Genie may still be working on the question, but no IDs came back to poll with, and asking again "
-                       "starts a duplicate question. Wait a minute or two, then try again.")
+        text += (" Genie may still be working on the question, but no response_id came back to poll with, and asking again "
+                 "starts a duplicate question.")
+        if conversation:
+            return text + (" To stop the follow-up first, call genie_cancel_response with conversation_id {}. Then wait a "
+                           "minute or two, and try again.".format(conversation))
+        return text + " Wait a minute or two, then try again."
     return text + " Try again."
 
 
@@ -672,7 +678,10 @@ def forward(message, context):
         try:
             status, response_headers, text = in_time(lambda: exchange(request, timeout), timeout, late)
         except urllib.error.URLError as error:
-            raise BridgeError(late if isinstance(error.reason, socket.timeout) else unreachable.format(host, error.reason))
+            if isinstance(error.reason, socket.timeout):  # a timeout while connecting, so Genie got nothing to answer
+                raise BridgeError("Genie at {} didn't answer within {} seconds, and the request wasn't sent. Check the network "
+                                  "connection, and connect to the VPN if the workspace needs one; then try again.".format(host, int(timeout)))
+            raise BridgeError(unreachable.format(host, error.reason))
         except socket.timeout:
             raise BridgeError(late)
         except (OSError, http.client.HTTPException) as error:

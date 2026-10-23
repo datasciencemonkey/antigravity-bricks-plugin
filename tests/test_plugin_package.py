@@ -156,6 +156,14 @@ def test_the_skill_says_that_asking_again_after_a_genie_ask_times_out_starts_a_d
     assert "`genie_ask`" in step and "times out" in step and "wait" in step
 
 
+def test_the_skill_says_to_cancel_a_follow_up_that_timed_out_before_asking_again():
+    # A follow-up has a conversation_id, and genie_cancel_response is conversation-scoped.
+    (step,) = [line.lower() for line in skill_text().splitlines() if "duplicate" in line.lower()]
+
+    assert "follow-up" in step and "`genie_cancel_response`" in step and "`conversation_id`" in step
+    assert step.index("`genie_cancel_response`") < step.index("ask once more")
+
+
 def skill_text():
     return (PLUGIN / "skills" / SKILL / "SKILL.md").read_text()
 
