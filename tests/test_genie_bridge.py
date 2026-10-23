@@ -1678,9 +1678,10 @@ def test_a_genie_ask_that_was_never_sent_for_lack_of_time_just_says_to_try_again
 
 
 REAL_CLI = shutil.which("databricks")
+needs_the_real_cli = pytest.mark.skipif(REAL_CLI is None, reason="the Databricks CLI isn't installed")
 
 
-@pytest.fixture(params=["stand-in", pytest.param("real", marks=pytest.mark.skipif(REAL_CLI is None, reason="the Databricks CLI isn't installed"))])
+@pytest.fixture(params=["stand-in", pytest.param("real", marks=needs_the_real_cli)])
 def any_cli(request, cli):
     return str(cli.path) if request.param == "stand-in" else REAL_CLI
 
@@ -1759,3 +1760,33 @@ def test_auth_token_fails_for_a_profile_that_is_not_listed(any_cli, cli, config,
     result = run_cli(any_cli, cli, "auth", "token", "--profile", profile, "--output", "json")
 
     assert result.returncode != 0 and result.stdout == ""
+
+
+def test_a_machine_with_no_config_file_at_all_is_not_configured_and_can_be_set_up(start, cli):
+    # A new machine has no config file, and the CLI fails on that instead of listing no profiles. First use starts there.
+    cli.config.unlink()
+    bridge = start(DATABRICKS_CONFIG_PROFILE="NEW")
+    bridge.send(call("genie_connection"))
+    first = bridge.reply()
+
+    assert "isError" not in first["result"], text_of(first)
+    assert report_of(first)["status"] == "not_configured" and report_of(first)["profiles"] == []
+
+    bridge.send(call("genie_setup", {"workspace_url": WORKSPACE}, number=4))
+    started = report_of(bridge.reply())
+    _, after = wait_for_sign_in_to_end(bridge)
+
+    assert started["status"] == "login_in_progress"
+    assert cli.logins() == [f"auth login --host {WORKSPACE} --profile NEW --timeout 5m"]
+    assert after["status"] == "ready"
+
+
+@needs_the_real_cli
+def test_with_the_real_cli_a_machine_with_no_config_file_is_not_configured(start, cli):
+    cli.config.unlink()
+    bridge = start(DATABRICKS_CLI=REAL_CLI, DATABRICKS_CONFIG_PROFILE="NEW")
+    bridge.send(call("genie_connection"))
+    reply = bridge.reply(timeout=60)
+
+    assert "isError" not in reply["result"], text_of(reply)
+    assert report_of(reply)["status"] == "not_configured"

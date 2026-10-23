@@ -252,7 +252,14 @@ class DatabricksCli:
             raise BridgeError("The Databricks CLI returned an unexpected response. " + failure)
 
     def profiles(self):
-        """The CLI's profiles, each {"name", "host", "auth_type"}, from its config file: a local read, no network call."""
+        """The CLI's profiles, each {"name", "host", "auth_type"}, from its config file: a local read, no network call. A machine
+        that never ran `databricks configure` or `auth login` has no config file, and the CLI fails on that instead of listing none."""
+        try:
+            os.stat(config_file(self.env))
+        except FileNotFoundError:
+            return []
+        except OSError:
+            pass  # the CLI says what is wrong with it
         reply = self.run(["auth", "profiles", "--skip-validate"],
                          "Couldn't read the Databricks CLI's profiles. Run `databricks auth profiles` in a terminal to see why.")
         return [{"name": item.get("name"), "host": item.get("host"), "auth_type": item.get("auth_type") or ""}
