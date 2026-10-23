@@ -11,8 +11,9 @@ Pull request titles and bodies are untrusted text. They are only parsed and writ
 command line, never given to a shell. The only command this tool runs is git, as a list of arguments, with a tag or
 a commit SHA that matched a strict pattern first. What a pull request can put into the notes is also limited. Its
 text becomes single lines (whitespace collapsed, control characters dropped) of bounded length, which cannot start a
-heading, quote, list, table or code fence of their own, and only its title and its Summary bullets are used. Inline
-Markdown in a bullet (code spans, emphasis, links) is kept on purpose; GitHub sanitizes what it renders.
+heading, quote, list, table, code fence, HTML block or link definition of their own, and only its title and its
+Summary bullets are used. Inline Markdown in a bullet (code spans, emphasis, links) is kept on purpose; GitHub
+sanitizes what it renders.
 
 Standard library only: the runner runs it with a bare python3.
 """
@@ -43,7 +44,9 @@ ATTRIBUTION = re.compile(r"This pull request and its description were written by
 HEADING = re.compile(r" {0,3}(#{1,6})(?:[ \t]+(.*))?")
 FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
 BULLET = re.compile(r"[ \t]*(?:[-*+]|\d{1,9}[.)])(?:[ \t]+(.*))?")
-BLOCK_START = re.compile(r"[#>+*=|-]|`{3}|~{3}")
+# What can open a Markdown block at the start of a line: a heading, quote, list item, table or code fence, an HTML
+# block or comment (<), or a link reference definition ([), which defines a link for the whole document.
+BLOCK_START = re.compile(r"[#>+*=|<\[-]|`{3}|~{3}")
 ORDERED = re.compile(r"(\d{1,9})([.)])")
 
 
@@ -170,7 +173,7 @@ def one_line(text, limit):
 
     Whitespace of every kind becomes a single space, control and formatting characters are dropped, the line is cut
     at limit characters (ending in an ellipsis), and a leading character that would make a heading, quote, list item,
-    table or code fence gets a backslash in front of it.
+    table, code fence, HTML block or link definition gets a backslash in front of it.
     """
     kept = []
     for char in text[: limit * 4]:  # more than will be kept, so a huge text isn't walked in full

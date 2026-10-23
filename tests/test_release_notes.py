@@ -282,10 +282,15 @@ def test_shell_metacharacters_in_every_field_are_only_text_in_the_notes(tmp_path
 MARKERS = [
     "# Fake heading", "## Release v9.9.9", "###### deep", "> quoted", "- nested", "* star", "+ plus", "1. numbered",
     "2) numbered", "10. ten", "=== underline", "| a | b |", "```python", "~~~", "--- rule", "*** rule",
+    # An HTML block or comment can swallow the entries after it; a link reference definition defines a link for the
+    # whole document.
+    "<pre>", "<!-- hidden", "<div class=x>", "<script>alert(1)</script>",
+    "[x]: https://example.invalid/", "[ref]: <https://example.invalid/> 'title'", "[^note]: a footnote",
+    "[link](https://example.invalid/)",
 ]
 
 
-BLOCK_START = re.compile(r"[#>+*=|~-]|`{3}|\d+[.)]")
+BLOCK_START = re.compile(r"[#>+*=|<\[~-]|`{3}|\d+[.)]")
 
 
 @pytest.mark.parametrize("text", MARKERS)
@@ -297,6 +302,28 @@ def test_a_title_or_a_bullet_cannot_start_a_markdown_block(text):
         assert line.startswith(("- ", "  - "))
         assert not BLOCK_START.match(re.sub(r"^ *- ", "", line)), line  # what follows the list marker starts no block
     assert text.replace("\\", "") in notes.replace("\\", "")  # still readable once the escapes are rendered
+
+
+def test_a_hostile_entry_cannot_swallow_or_redefine_the_entries_around_it():
+    pulls = [
+        pr(1, "First", "## Summary\n- fine\n", merged_at="2026-10-23T10:01:00Z"),
+        pr(2, "<pre>", "## Summary\n- <!--\n- [x]: https://example.invalid/\n", merged_at="2026-10-23T10:02:00Z"),
+        pr(3, "Last", "## Summary\n- also fine\n", merged_at="2026-10-23T10:03:00Z"),
+    ]
+
+    notes = notes_for(*pulls)
+
+    for line in notes.splitlines()[2:]:
+        assert not re.match(r"[ -]*[<\[]", line), line  # nothing opens an HTML block or defines a link
+    assert "\\<pre> (#2)" in notes and "\\[x]: https://example.invalid/" in notes
+    assert "- First (#1)\n  - fine\n" in notes and "- Last (#3)\n  - also fine\n" in notes
+
+
+@pytest.mark.parametrize("text", ["Support a < b and [x] arrays", "Fix <b> and [x]: later", "Use x[0] and <T>"])
+def test_a_less_than_sign_or_bracket_inside_the_text_is_left_alone(text):
+    notes = notes_for(pr(1, title=text, body=f"## Summary\n- {text}\n"))
+
+    assert notes.count(text) == 2 and "\\" not in notes
 
 
 def test_a_heading_inside_the_title_or_the_summary_cannot_forge_a_section():
