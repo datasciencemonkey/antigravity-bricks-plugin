@@ -126,12 +126,14 @@ def genie():
 # lost. It accepts only the flags the bridge should pass, records each call in $FAKE_CLI_CALLS, and the names (never the
 # values) of the DATABRICKS_* variables it was started with in $FAKE_CLI_CALLS.env, and hands out the comma-separated
 # $FAKE_TOKENS in order. FAKE_CLI_FAIL makes `auth token` fail as an expired sign-in does, FAKE_PROFILES_FAIL breaks
-# `auth profiles`, and FAKE_LOGIN_SECONDS and FAKE_LOGIN_FAIL shape `auth login`.
+# `auth profiles`, FAKE_LOGIN_SECONDS and FAKE_LOGIN_FAIL shape `auth login`, and FAKE_CLI_CONFIG names a config file to read
+# instead of the one in DATABRICKS_CONFIG_FILE, as the real CLI does on Windows, where it looks under USERPROFILE, wherever
+# HOME points.
 FAKE_CLI = r"""#!/bin/sh
 echo "$@" >> "$FAKE_CLI_CALLS"
 env | sed -n 's/^\(DATABRICKS_[A-Za-z0-9_]*\)=.*/\1/p' >> "$FAKE_CLI_CALLS.env"
 fail() { echo "Error: $*" >&2; exit 1; }
-config="${DATABRICKS_CONFIG_FILE:-~/.databrickscfg}"
+config="${FAKE_CLI_CONFIG:-${DATABRICKS_CONFIG_FILE:-~/.databrickscfg}}"
 case "$config" in "~"*) config="$HOME${config#"~"}" ;; esac
 need_config() { [ -f "$config" ] || fail "cannot parse config file: no configuration file found at $config; please create one by running 'databricks auth login'"; }
 # The config file as section<TAB>key<TAB>value lines, read like the real CLI's INI parser: keys before the first header
@@ -1985,3 +1987,49 @@ def test_with_the_real_cli_a_machine_with_no_config_file_is_not_configured(start
 
     assert "isError" not in reply["result"], text_of(reply)
     assert report_of(reply)["status"] == "not_configured"
+
+
+def test_the_profiles_the_cli_lists_are_found_even_where_the_bridge_guesses_the_config_file_wrong(start, cli, tmp_path):
+    # On Windows the CLI keeps its config under USERPROFILE, wherever HOME points, so the bridge's own guess can be a path that
+    # doesn't exist while the CLI lists a profile. Taking that for "no profiles" would sign a PAT profile in over.
+    cli.set_profiles({"DEMO": (WORKSPACE, "pat")})
+    bridge = start(DATABRICKS_CONFIG_FILE=str(tmp_path / "no-such-file"), FAKE_CLI_CONFIG=str(cli.config))
+    _, report = bridge.connection(3)
+    bridge.send(call("genie_setup", {"workspace_url": WORKSPACE}, number=4))
+    setup = bridge.reply()
+    time.sleep(0.3)
+
+    assert cli.logins() == []
+    assert report["status"] == "unsupported_auth"
+    assert setup["result"]["isError"] is True and "OAuth U2M" in text_of(setup)
+
+
+def test_a_missing_config_file_does_not_hide_a_cli_that_is_missing_too(tmp_path):
+    bridge = load_bridge()
+    cli = bridge.DatabricksCli({"DATABRICKS_CLI": str(tmp_path / "no-such-databricks"),
+                                "DATABRICKS_CONFIG_FILE": str(tmp_path / "no-such-config")})
+
+    with pytest.raises(bridge.CliMissing):
+        cli.profiles()
+
+
+def test_a_missing_config_file_does_not_hide_a_call_that_has_run_out_of_time(monkeypatch, tmp_path):
+    bridge = load_bridge()
+    monkeypatch.setattr(bridge, "DEADLINE", bridge.time.monotonic() - 5)
+    cli = bridge.DatabricksCli({"DATABRICKS_CLI": "databricks", "DATABRICKS_CONFIG_FILE": str(tmp_path / "no-such-config")})
+
+    with pytest.raises(bridge.OutOfTime):
+        cli.profiles()
+
+
+def test_the_config_file_is_under_userprofile_on_windows_where_the_cli_looks_and_under_home_elsewhere(monkeypatch):
+    bridge = load_bridge()
+    env = {"HOME": "/git-bash/home", "USERPROFILE": "/windows/profile"}
+    with monkeypatch.context() as patch:  # nothing but strings in here: Path would refuse to be built as a Windows path
+        patch.setattr(bridge.os, "name", "nt")
+        default = bridge.config_file(env)
+        tilde = bridge.config_file({**env, "DATABRICKS_CONFIG_FILE": "~/custom.cfg"})
+
+    assert default == os.path.join("/windows/profile", ".databrickscfg")
+    assert tilde == os.path.join("/windows/profile", "custom.cfg")
+    assert bridge.config_file(env) == os.path.join("/git-bash/home", ".databrickscfg")

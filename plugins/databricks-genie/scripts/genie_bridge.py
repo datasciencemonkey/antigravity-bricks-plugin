@@ -144,8 +144,9 @@ def cli_candidates(env):
 
 
 def config_file(env):
-    """The file the Databricks CLI keeps its profiles in: $DATABRICKS_CONFIG_FILE, else ~/.databrickscfg."""
-    home = env.get("HOME") or os.path.expanduser("~")
+    """The file the Databricks CLI keeps its profiles in: $DATABRICKS_CONFIG_FILE, else ~/.databrickscfg. The CLI's home folder
+    is USERPROFILE on Windows, whatever HOME says, and HOME elsewhere."""
+    home = (env.get("USERPROFILE") if os.name == "nt" else env.get("HOME")) or os.path.expanduser("~")
     path = env.get("DATABRICKS_CONFIG_FILE") or os.path.join(home, ".databrickscfg")
     return os.path.join(home, path[1:].lstrip("/\\")) if path.startswith("~") else path  # the CLI expands a leading ~
 
@@ -268,17 +269,29 @@ class DatabricksCli:
 
     def profiles(self):
         """The CLI's profiles, each {"name", "host", "auth_type"}, from its config file: a local read, no network call. A machine
-        that never ran `databricks configure` or `auth login` has no config file, and the CLI fails on that instead of listing none."""
+        that never ran `databricks configure` or `auth login` has no config file, and the CLI fails on that instead of listing none,
+        so a failure with no config file where the bridge looks means no profiles. The CLI is asked first, because it may keep its
+        config somewhere the bridge doesn't look (on Windows, under USERPROFILE), and then its answer is the one to trust."""
+        try:
+            reply = self.run(["auth", "profiles", "--skip-validate"],
+                             "Couldn't read the Databricks CLI's profiles. Run `databricks auth profiles` in a terminal to see why.")
+        except (CliMissing, OutOfTime):
+            raise
+        except BridgeError:
+            if self.config_file_is_missing():
+                return []
+            raise
+        return [{"name": item.get("name"), "host": item.get("host"), "auth_type": item.get("auth_type") or ""}
+                for item in (reply.get("profiles") or []) if isinstance(item, dict)]
+
+    def config_file_is_missing(self):
         try:
             os.stat(config_file(self.env))
         except FileNotFoundError:
-            return []
+            return True
         except OSError:
-            pass  # the CLI says what is wrong with it
-        reply = self.run(["auth", "profiles", "--skip-validate"],
-                         "Couldn't read the Databricks CLI's profiles. Run `databricks auth profiles` in a terminal to see why.")
-        return [{"name": item.get("name"), "host": item.get("host"), "auth_type": item.get("auth_type") or ""}
-                for item in (reply.get("profiles") or []) if isinstance(item, dict)]
+            pass  # not missing, only unreadable: the CLI says what is wrong with it
+        return False
 
     def own_profile(self):
         return next((item for item in self.profiles() if item["name"] == self.profile), None)
