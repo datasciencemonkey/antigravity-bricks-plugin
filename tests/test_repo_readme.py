@@ -45,6 +45,7 @@ SHARED_FACTS = [
     "has no `~/.databrickscfg` yet, and that's fine: the first sign-in creates it",
     "the plugin never takes a workspace from your environment",
     "gets your environment unchanged and reads its usual `DATABRICKS_*` variables",
+    "doesn't redirect it: the CLI still answers with that profile's own sign-in",
     TRADEMARK,
 ]
 
@@ -222,8 +223,7 @@ def test_troubleshooting_covers_403_unsupported_auth_timeouts_and_polling_again(
 
 
 @pytest.mark.parametrize(
-    "label", ["`profile_exists_unreadable`:", '"Genie returned a non-JSON page":', "A question times out:",
-              "`DATABRICKS_HOST` or `DATABRICKS_TOKEN` in your shell:"]
+    "label", ["`profile_exists_unreadable`:", '"Genie returned a non-JSON page":', "A question times out:"]
 )
 def test_troubleshooting_explains_the_follow_up_failures_in_the_same_words_in_both_readmes(label):
     assert troubleshooting_bullet(README, label) == troubleshooting_bullet(PLUGIN_README, label)
@@ -269,7 +269,10 @@ def test_use_another_profile_says_the_workspace_comes_from_the_profile_and_the_c
                  "where it calls",
                  "The plugin itself reads only `DATABRICKS_CONFIG_PROFILE` and `DATABRICKS_CONFIG_FILE`",
                  "The Databricks CLI it runs gets your environment unchanged and reads its usual `DATABRICKS_*` variables, "
-                 "such as `DATABRICKS_AUTH_STORAGE`, as it does in your terminal"):
+                 "such as `DATABRICKS_AUTH_STORAGE`, as it does in your terminal",
+                 "The plugin names the profile on every call, and in Databricks CLI 1.22.1 exporting `DATABRICKS_HOST` for "
+                 "another workspace, `DATABRICKS_TOKEN`, `DATABRICKS_AUTH_TYPE`, a client ID and secret, or "
+                 "`DATABRICKS_ACCOUNT_ID` doesn't redirect it: the CLI still answers with that profile's own sign-in"):
         assert fact in profile, fact
 
 
@@ -282,14 +285,15 @@ def test_the_readmes_no_longer_say_the_plugin_ignores_or_withholds_databricks_va
 
 
 @pytest.mark.parametrize("path", DOCUMENTS)
-def test_troubleshooting_says_to_unset_a_databricks_host_or_token_exported_for_another_workspace(path):
-    entry = troubleshooting_bullet(path, "`DATABRICKS_HOST` or `DATABRICKS_TOKEN` in your shell:")
+def test_troubleshooting_no_longer_tells_users_to_unset_a_databricks_host_or_token_because_it_breaks_nothing(path):
+    # CLI v1.22.1 answers `auth token --profile` with the profile's own token whatever is exported (a contract test checks it
+    # on the real CLI), so there is no sign-in error to troubleshoot. An earlier entry said there was.
+    text = read(path)
 
-    for fact in ("the Databricks CLI reads them, as it does in your terminal",
-                 "If your shell exports either one for another workspace, Genie can report a sign-in error",
-                 "Unset them in the environment Antigravity starts from", "restart Antigravity",
-                 "ask the agent to check the Genie connection"):
-        assert fact in entry, fact
+    assert "in your shell:**" not in section(path, "Troubleshooting")
+    for old in ("Genie can report a sign-in error", "Unset them in the environment Antigravity starts from",
+                "If your shell exports either one for another workspace"):
+        assert old not in text, old
 
 
 def test_the_security_section_says_where_the_token_goes_and_when_a_profile_is_profile_exists_unreadable():

@@ -2001,6 +2001,41 @@ def test_auth_token_fails_for_a_profile_that_is_not_listed(any_cli, cli, config,
     assert result.returncode != 0 and result.stdout == ""
 
 
+EXPORTED = [
+    pytest.param({}, id="nothing exported"),
+    pytest.param({"DATABRICKS_HOST": "https://a.invalid"}, id="DATABRICKS_HOST for another workspace"),
+    pytest.param({"DATABRICKS_TOKEN": "made-up-pat"}, id="DATABRICKS_TOKEN"),
+    pytest.param({"DATABRICKS_AUTH_TYPE": "pat"}, id="DATABRICKS_AUTH_TYPE"),
+    pytest.param({"DATABRICKS_CLIENT_ID": "id", "DATABRICKS_CLIENT_SECRET": "secret"}, id="a client ID and secret"),
+    pytest.param({"DATABRICKS_ACCOUNT_ID": "account"}, id="DATABRICKS_ACCOUNT_ID"),
+    pytest.param({"DATABRICKS_HOST": "https://a.invalid", "DATABRICKS_TOKEN": "made-up-pat", "DATABRICKS_AUTH_TYPE": "pat",
+                  "DATABRICKS_CLIENT_ID": "id", "DATABRICKS_CLIENT_SECRET": "secret", "DATABRICKS_ACCOUNT_ID": "account"},
+                 id="all of them"),
+]
+
+
+@needs_the_real_cli
+@pytest.mark.parametrize("exported", EXPORTED)
+def test_auth_token_answers_with_the_profiles_own_u2m_token_whatever_databricks_variables_are_exported(cli, exported):
+    # The bridge names the profile on every call, and the README says an exported DATABRICKS_HOST or DATABRICKS_TOKEN doesn't
+    # redirect it. This is the real CLI doing that, offline: a made-up token in a token cache in the temporary HOME (plaintext
+    # storage, so the OS keyring is never touched), under the profile's name, on a host that never resolves.
+    cli.set_config("[P]\nhost = https://b.invalid\nauth_type = databricks-cli\n")
+    (cli.home / ".databricks").mkdir()
+    (cli.home / ".databricks" / "token-cache.json").write_text(json.dumps({"version": 1, "tokens": {"P": {
+        "access_token": "profile-token", "token_type": "Bearer", "refresh_token": "profile-refresh", "expiry": "2099-01-01T00:00:00Z"}}}))
+
+    def token_with(variables):
+        result = run_cli(REAL_CLI, cli, "auth", "token", "--profile", "P", "--output", "json",
+                         DATABRICKS_AUTH_STORAGE="plaintext", **variables)
+        return json.loads(result.stdout).get("access_token") if result.returncode == 0 else None
+
+    if token_with({}) != "profile-token":
+        pytest.skip("this version of the Databricks CLI doesn't read a made-up token cache, so there is nothing to compare")
+
+    assert token_with(exported) == "profile-token"
+
+
 def test_a_machine_with_no_config_file_at_all_is_not_configured_and_can_be_set_up(start, cli):
     # A new machine has no config file, and the CLI fails on that instead of listing no profiles. First use starts there.
     cli.config.unlink()

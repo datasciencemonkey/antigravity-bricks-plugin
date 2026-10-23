@@ -264,10 +264,14 @@ def test_the_cli_owns_its_environment_decision_is_recorded_with_its_price_and_it
                  "user's terminal", "`DATABRICKS_AUTH_STORAGE`", "`DATABRICKS_OAUTH_CALLBACK_PORT`",
                  "reads only `DATABRICKS_CONFIG_PROFILE`", "`DATABRICKS_CONFIG_FILE`", "`GENIE_BRIDGE_DATABRICKS_CLI`",
                  "it never reads `DATABRICKS_HOST`", "comes only from the CLI's profile listing",
-                 "an exported `DATABRICKS_HOST` or `DATABRICKS_TOKEN` for another workspace can make the CLI report a sign-in "
-                 "error", "unset them", "`GENIE_MCP_URL`", "only for a loopback URL",
+                 "An exported `DATABRICKS_HOST` costs nothing in v1.22.1",
+                 "the bridge names the profile on every call (and `--host` for a sign-in)",
+                 "answers `auth token --profile` with the profile's own U2M token", "A contract test on the real CLI pins it",
+                 "`GENIE_MCP_URL`", "only for a loopback URL",
                  "An earlier version filtered the CLI's environment", "looked like `login_needed`"):
         assert fact in decision, fact
+    for old in ("can make the CLI report a sign-in error", "unset them"):  # it doesn't: the real CLI was checked
+        assert old not in decision, old
 
 
 def test_the_standalone_connector_decision_says_what_each_kind_of_timeout_tells_the_agent():
@@ -283,6 +287,7 @@ def test_what_we_know_records_how_the_real_databricks_cli_behaves():
     known = what_we_know()
     exits = bullet(known, "- `databricks auth profiles --skip-validate` exits 1")
     storage = bullet(known, "- `DATABRICKS_AUTH_STORAGE`")
+    token = bullet(known, "- `auth token --profile P` answers with P's own cached U2M token")
     lists = bullet(known, "- It lists only config sections that have a host or an account_id")
     parser = bullet(known, "- The INI parser (go-ini)")
     configure = bullet(known, "- `databricks configure --host <host> --profile <name>`")
@@ -296,6 +301,10 @@ def test_what_we_know_records_how_the_real_databricks_cli_behaves():
                  "tell users to set it", "`DATABRICKS_OAUTH_CALLBACK_PORT`", "`DATABRICKS_DISABLE_OAUTH_REFRESH_TOKEN`",
                  "which is why the bridge leaves its environment alone"):
         assert fact in storage, fact
+    for fact in ("`DATABRICKS_HOST` for another workspace", "`DATABRICKS_TOKEN`", "`DATABRICKS_AUTH_TYPE`",
+                 "`DATABRICKS_CLIENT_ID`", "`DATABRICKS_ACCOUNT_ID`", "checked offline",
+                 "`<HOME>/.databricks/token-cache.json`", "a cache keyed by host is not"):
+        assert fact in token, fact
     for fact in ("`account_id`", "`azure_workspace_resource_id`", "an empty header"):
         assert fact in lists, fact
     for fact in ("keys before the first header into DEFAULT", "merges them with a later `[DEFAULT]` header",
@@ -327,8 +336,11 @@ def test_progress_md_lists_the_review_fixes_for_the_hidden_profile_the_missing_c
                  "Databricks CLI gets the bridge's environment unchanged", "`DATABRICKS_AUTH_STORAGE`",
                  "a headless sign-in made with plaintext storage looked like `login_needed`",
                  "The bridge asks the CLI for its profiles first", "can't hide a listed profile",
+                 "A contract test on the real CLI shows `auth token --profile` still returns the profile's own token",
+                 "reads only two `DATABRICKS_*` variables", "`GENIE_BRIDGE_DATABRICKS_CLI`",
                  "cancel its running question first", "the request wasn't sent"):
         assert fact in fixes, fact
+    assert "Genie can report a sign-in error" not in fixes  # the old claim: the real CLI was checked, and it doesn't
     assert "reading only section names" not in fixes
     assert "no `DATABRICKS_*` variable except" not in fixes
 
