@@ -45,13 +45,13 @@ To update, run the same `agy plugin install https://github.com/datasciencemonkey
 
 ## First use
 
-The plugin uses your `DEFAULT` Databricks CLI profile, unless you [pick another one](#use-another-databricks-cli-profile). The first time you ask Genie something, the agent checks that profile:
+The plugin uses your `DEFAULT` Databricks CLI profile, unless you [pick another one](#use-another-databricks-cli-profile). The first time you ask Genie something, the agent checks the Databricks CLI and then that profile:
 
-1. If it's signed in, the agent goes straight to Genie.
-2. If the profile isn't set up, the agent asks for your workspace URL, such as `https://<workspace>.cloud.databricks.com`. It never guesses one, and it never picks a profile for you.
-3. If the Databricks CLI isn't installed, the agent offers to install it with Databricks' official installer, and only does so after you say yes. It explains why: the CLI is the safest way to run OAuth U2M (user-to-machine) sign-in from your own machine. You sign in in your browser with your usual single sign-on and MFA, and you never create or paste a token.
-4. A browser window opens for you to sign in. Once you have, Genie answers.
-5. Before each question, the agent says "Asking Genie in <host> (Databricks CLI profile <profile>)", and the answer ends with a matching "Asked Genie in <host> (Databricks CLI profile <profile>)" line.
+1. If the Databricks CLI isn't installed, the agent offers to install it with Databricks' official installer, and only does so after you say yes. It explains why: the CLI is the safest way to run OAuth U2M (user-to-machine) sign-in from your own machine. You sign in in your browser with your usual single sign-on and MFA, and you never create or paste a token.
+2. If the profile is signed in, the agent goes straight to Genie.
+3. If the profile isn't set up, the agent asks for your workspace URL, such as `https://<workspace>.cloud.databricks.com`. It never guesses one, and it never picks a profile for you.
+4. A browser window opens for you to sign in. When you've signed in, tell the agent in the chat, and it carries on with your question.
+5. Before each question, the agent says "Asking Genie in <host> (Databricks CLI profile <profile>)", so you can always see which workspace and profile a question goes to.
 
 When a sign-in expires, the agent signs you in again to the same workspace. The plugin never changes which workspace an existing profile points to. You can also sign in yourself first: `databricks auth login --host https://<workspace>.cloud.databricks.com --profile DEFAULT`. To install the Databricks CLI yourself, use `brew install databricks/tap/databricks` on a Mac with Homebrew, or `curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh` on macOS or Linux.
 
@@ -69,8 +69,8 @@ In chat, `/antigravity-databricks-genie` loads the skill directly.
 
 Set `DATABRICKS_CONFIG_PROFILE` to the profile's name in the environment Antigravity starts from:
 
-- **The `agy` CLI:** run `export DATABRICKS_CONFIG_PROFILE=<name>` in your shell before `agy`.
-- **The desktop app on a Mac:** run `launchctl setenv DATABRICKS_CONFIG_PROFILE <name>`, then quit the app fully (Cmd-Q) and open it again. This lasts until you log out. To go back to `DEFAULT`, run `launchctl unsetenv DATABRICKS_CONFIG_PROFILE` and restart the app.
+- **The `agy` CLI:** run `DATABRICKS_CONFIG_PROFILE=<name> agy ...` to use the profile for that command only.
+- **The desktop app on a Mac:** quit the app fully (Cmd-Q), then open it with `open -a Antigravity --env DATABRICKS_CONFIG_PROFILE=<name>`. The profile applies to that launch only, so no other app on your Mac sees it. To go back to `DEFAULT`, quit the app and open it as usual.
 
 If that profile doesn't exist yet, the agent sets it up the same way on first use.
 
@@ -134,4 +134,4 @@ Leave `genie_setup` out. It sets up a Databricks CLI profile and opens a browser
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). Databricks and the Databricks logo are trademarks of Databricks, Inc., and the MIT license covers the code, not the marks.

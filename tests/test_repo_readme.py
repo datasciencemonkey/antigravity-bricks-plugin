@@ -22,6 +22,7 @@ INSTALL_PLUGIN = f"agy plugin install {REPO_URL}"
 WORKSPACE_LINE = "Asking Genie in <host> (Databricks CLI profile <profile>)"
 HEADLESS_TOOL_NOT_ALLOWED = "genie_setup"
 DOCUMENTS = [pytest.param(README, id="root"), pytest.param(PLUGIN_README, id="plugin")]
+TRADEMARK = "Databricks and the Databricks logo are trademarks of Databricks, Inc., and the MIT license covers the code, not the marks."
 
 # What both READMEs must state, word for word, so the plugin's README never contradicts the root one.
 SHARED_FACTS = [
@@ -33,14 +34,15 @@ SHARED_FACTS = [
     "Windows is untested",
     WORKSPACE_LINE,
     "OAuth U2M",
-    "export DATABRICKS_CONFIG_PROFILE=<name>",
-    "launchctl setenv DATABRICKS_CONFIG_PROFILE <name>",
-    "launchctl unsetenv DATABRICKS_CONFIG_PROFILE",
+    "tell the agent in the chat",
+    "DATABRICKS_CONFIG_PROFILE=<name> agy",
+    "open -a Antigravity --env DATABRICKS_CONFIG_PROFILE=<name>",
     "~/.gemini/antigravity-cli/settings.json",
     "unsupported_auth",
     "IP access list",
     "IDE 2.5.5",
     "doesn't run plugin MCP servers",
+    TRADEMARK,
 ]
 
 
@@ -124,8 +126,27 @@ def test_first_use_walks_through_the_databricks_cli_profile_check_and_the_sign_i
 
     for fact in ("Databricks CLI profile", "workspace URL", "https://<workspace>.cloud.databricks.com", "never guesses",
                  "never picks a profile", "browser", "official installer", "only does so after you say yes",
-                 "OAuth U2M", "safest", "single sign-on", WORKSPACE_LINE, "Asked Genie in <host>"):
+                 "OAuth U2M", "safest", "single sign-on", WORKSPACE_LINE):
         assert fact in first_use, fact
+
+
+def test_first_use_checks_the_databricks_cli_first_like_the_bridge_does():
+    first_use = section(README, "First use")
+
+    assert first_use.index("isn't installed") < first_use.index("is signed in") < first_use.index("workspace URL")
+
+
+def test_first_use_says_the_user_tells_the_agent_when_the_sign_in_is_done_instead_of_promising_an_answer():
+    first_use = section(README, "First use")
+
+    assert "tell the agent in the chat" in first_use
+    assert "Once you have, Genie answers" not in first_use
+
+
+def test_the_readme_promises_only_the_line_the_agent_says_before_it_asks_not_one_that_ends_the_answer():
+    # The bridge adds "Asked Genie in ..." to the genie_ask result, which on the polling path is only the
+    # acknowledgement, so no answer is guaranteed to end with it.
+    assert "Asked Genie in" not in read(README)
 
 
 def test_try_it_lists_the_manifests_suggested_prompts_and_the_slash_command():
@@ -139,10 +160,15 @@ def test_try_it_lists_the_manifests_suggested_prompts_and_the_slash_command():
 def test_the_readme_explains_how_to_use_another_databricks_cli_profile():
     profile = section(README, "Use another Databricks CLI profile")
 
-    for command in ("DATABRICKS_CONFIG_PROFILE", "export DATABRICKS_CONFIG_PROFILE=<name>",
-                    "launchctl setenv DATABRICKS_CONFIG_PROFILE <name>", "launchctl unsetenv DATABRICKS_CONFIG_PROFILE"):
+    for command in ("DATABRICKS_CONFIG_PROFILE", "DATABRICKS_CONFIG_PROFILE=<name> agy ...",
+                    "open -a Antigravity --env DATABRICKS_CONFIG_PROFILE=<name>"):
         assert command in profile, command
-    assert "restart" in profile.lower()
+    assert "quit the app fully" in profile and "that launch only" in profile
+
+
+@pytest.mark.parametrize("path", DOCUMENTS)
+def test_neither_readme_switches_profiles_with_launchctl_which_reaches_every_app_opened_until_logout(path):
+    assert "launchctl" not in read(path)
 
 
 @pytest.mark.parametrize("path", DOCUMENTS)
@@ -192,24 +218,26 @@ def test_troubleshooting_covers_403_unsupported_auth_timeouts_and_polling_again(
         assert fact in troubleshooting, fact
 
 
-@pytest.mark.parametrize("label", ["`profile_exists_unreadable`:", '"Genie returned a non-JSON page":'])
-def test_troubleshooting_explains_the_follow_up_failures_in_the_same_words_as_the_plugins_readme(label):
+@pytest.mark.parametrize(
+    "label", ["`profile_exists_unreadable`:", '"Genie returned a non-JSON page":', "A question times out:"]
+)
+def test_troubleshooting_explains_the_follow_up_failures_in_the_same_words_in_both_readmes(label):
     assert troubleshooting_bullet(README, label) == troubleshooting_bullet(PLUGIN_README, label)
 
 
-def test_a_question_that_times_out_is_explained_as_in_the_plugins_readme_with_the_duplicate_warning():
-    label = "A question times out:"
-    root = troubleshooting_bullet(README, label)
-    plugin_words = troubleshooting_bullet(PLUGIN_README, label).split(":**", 1)[1].strip()
+@pytest.mark.parametrize("path", DOCUMENTS)
+def test_a_question_that_times_out_is_explained_with_the_limits_and_the_duplicate_warning(path):
+    entry = troubleshooting_bullet(path, "A question times out:")
 
-    assert plugin_words in root
-    assert "3 minutes" in root and "150 seconds" in root
-    assert "starts a duplicate question" in root
+    assert "3 minutes" in entry and "150 seconds" in entry
+    assert "polls again with the same IDs" in entry  # a timed-out poll still has its IDs
+    assert "its IDs never came back, and asking again starts a duplicate question" in entry  # a timed-out genie_ask doesn't
 
 
-def test_the_older_entry_that_said_to_ask_the_agent_to_check_again_is_merged_into_the_one_above():
-    # It told readers to poll with the same IDs, which a question that timed out never got.
-    assert "**A call timed out:**" not in section(README, "Troubleshooting")
+@pytest.mark.parametrize("path", DOCUMENTS)
+def test_the_older_entry_that_said_to_ask_the_agent_to_check_again_is_merged_into_the_one_above(path):
+    # It told readers the agent polls with the same IDs, which a question that timed out never got.
+    assert "**A call timed out:**" not in section(path, "Troubleshooting")
 
 
 def test_development_points_at_the_test_command_and_agents_md():
@@ -222,6 +250,12 @@ def test_development_points_at_the_test_command_and_agents_md():
 def test_the_license_section_says_mit_and_the_license_file_is_the_mit_license():
     assert "MIT" in section(README, "License")
     assert read(REPO_ROOT / "LICENSE").startswith("MIT License")
+
+
+@pytest.mark.parametrize("path", DOCUMENTS)
+def test_the_license_section_says_the_mit_license_covers_the_code_and_not_the_databricks_marks(path):
+    # The plugin's logo is the Databricks icon, and an MIT license grants nothing in a trademark.
+    assert TRADEMARK in section(path, "License")
 
 
 def test_the_readme_uses_workspace_placeholders_never_real_hostnames():

@@ -328,9 +328,9 @@ def test_readme_explains_the_first_use_flow():
 def test_readme_explains_how_to_switch_cli_profiles():
     readme = readme_text()
 
-    assert "export DATABRICKS_CONFIG_PROFILE=<name>" in readme
-    assert "launchctl setenv DATABRICKS_CONFIG_PROFILE <name>" in readme
-    assert "launchctl unsetenv DATABRICKS_CONFIG_PROFILE" in readme
+    assert "DATABRICKS_CONFIG_PROFILE=<name> agy" in readme
+    assert "open -a Antigravity --env DATABRICKS_CONFIG_PROFILE=<name>" in readme  # this launch only
+    assert "launchctl" not in readme  # setenv would reach every app opened until logout, Terminal included
 
 
 def test_readme_try_it_lists_the_manifests_suggested_prompts_word_for_word():
