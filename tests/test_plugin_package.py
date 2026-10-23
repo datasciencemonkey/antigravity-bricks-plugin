@@ -149,6 +149,13 @@ def test_the_skill_says_to_poll_again_with_the_same_ids_when_a_poll_times_out():
     assert "time" in step and "poll again" in step and "same" in step
 
 
+def test_the_skill_says_that_asking_again_after_a_genie_ask_times_out_starts_a_duplicate_question():
+    # The timed-out question keeps running in Genie and its IDs never come back, so there is nothing to poll with.
+    (step,) = [line.lower() for line in skill_text().splitlines() if "duplicate" in line.lower()]
+
+    assert "`genie_ask`" in step and "times out" in step and "wait" in step
+
+
 def skill_text():
     return (PLUGIN / "skills" / SKILL / "SKILL.md").read_text()
 

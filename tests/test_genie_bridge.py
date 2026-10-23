@@ -10,6 +10,7 @@ import os
 import queue
 import re
 import signal
+import socket
 import stat
 import subprocess
 import threading
@@ -1595,3 +1596,53 @@ def test_checking_the_connection_creates_no_folder(start, cli):
     bridge.connection(3)
 
     assert not cli.records.parent.exists()
+
+
+def never_answers_tool_calls(monkeypatch, bridge, how):
+    """Replace urlopen with a Genie that answers everything but tools/call: that either hangs or ends in a socket timeout."""
+    def urlopen(request, timeout=None):
+        if json.loads(request.data)["method"] == "tools/call":
+            if how == "socket":
+                raise socket.timeout("timed out")
+            time.sleep(5)
+        return FakeResponse()
+
+    monkeypatch.setattr(bridge.urllib.request, "urlopen", urlopen)
+
+
+@pytest.mark.parametrize("how", ["hangs", "socket"])
+def test_a_genie_ask_that_times_out_says_asking_again_starts_a_duplicate_question(monkeypatch, capsys, loaded, how):
+    # Genie keeps working on a question after the bridge gives up, and the IDs it would have sent back are lost.
+    context = short_limit(loaded, monkeypatch, {"GENIE_MCP_URL": "http://example.invalid/x"}, 2)
+    never_answers_tool_calls(monkeypatch, loaded, how)
+    loaded.handle(json.dumps(call("genie_ask", {"question": "Revenue last quarter?"})), context)
+    reply = json.loads(capsys.readouterr().out)
+    message = text_of(reply)
+
+    assert reply["result"]["isError"] is True
+    assert "duplicate" in message and "wait" in message.lower()
+    assert "same IDs" not in message  # no IDs came back to poll with
+
+
+@pytest.mark.parametrize("how", ["hangs", "socket"])
+@pytest.mark.parametrize("name", ["genie_poll_response", "genie_get_query_result"])
+def test_a_call_that_has_ids_and_times_out_gives_them_back_for_polling(monkeypatch, capsys, loaded, how, name):
+    context = short_limit(loaded, monkeypatch, {"GENIE_MCP_URL": "http://example.invalid/x"}, 2)
+    never_answers_tool_calls(monkeypatch, loaded, how)
+    loaded.handle(json.dumps(call(name, {**POLL, "item_id": "i-1"})), context)
+    message = text_of(json.loads(capsys.readouterr().out))
+
+    assert "genie_poll_response" in message and "conversation_id c-1" in message and "response_id r-1" in message
+    assert "duplicate" in message
+
+
+def test_a_genie_ask_that_was_never_sent_for_lack_of_time_just_says_to_try_again(monkeypatch, capsys, loaded):
+    timeouts = slow_genie(monkeypatch, loaded, 80)
+    context = loaded.new_context({"GENIE_MCP_URL": "http://example.invalid/x", "DATABRICKS_CONFIG_PROFILE": "TEST"})
+    context["cli"] = FakeCli()
+
+    loaded.handle(json.dumps(call("genie_ask", {"question": "Revenue last quarter?"})), context)
+    message = text_of(json.loads(capsys.readouterr().out))
+
+    assert timeouts == [150, 80]  # opening the session used up the time, so the question itself was never sent
+    assert "Try again" in message and "duplicate" not in message

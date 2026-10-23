@@ -27,7 +27,7 @@ Never pick a profile or a workspace URL for the user. `genie_setup` never change
 ## Ask Genie
 
 1. Before each `genie_ask`, tell the user "Asking Genie in <host> (Databricks CLI profile <profile>)", with the host and profile from `genie_connection`. The bridge ends each `genie_ask` result with a matching line, "Asked Genie in <host> (Databricks CLI profile <profile>)".
-2. Call `genie_ask` with the user's question in plain language. For a follow-up, pass the `conversation_id` from the previous answer so Genie keeps the context.
+2. Call `genie_ask` with the user's question in plain language. For a follow-up, pass the `conversation_id` from the previous answer so Genie keeps the context. If `genie_ask` itself times out, Genie may still be working on the question, but its IDs never came back, so asking again starts a duplicate question: wait a minute or two, then ask once more.
 3. `genie_ask` returns a `conversation_id` and a `response_id` with status `in_progress`. Call `genie_poll_response` with both. While it says it's still running, call it again without narrating each poll. Answers usually take 5–30 seconds. If a poll call times out, poll again with the same `conversation_id` and `response_id` instead of asking the question again.
 4. The finished answer is Markdown: Genie's reasoning, the SQL it ran, result tables, and an "Explore in Databricks" link. Show the user the key numbers, the SQL, and that link.
 5. Result tables in the answer are previews. For complete rows, call `genie_get_query_result` with the `conversation_id`, the `response_id`, and the query's `item_id`.

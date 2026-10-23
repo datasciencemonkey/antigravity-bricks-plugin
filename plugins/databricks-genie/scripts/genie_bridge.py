@@ -194,10 +194,10 @@ def time_left(cap):
     return cap if DEADLINE is None else min(cap, DEADLINE - time.monotonic())
 
 
-def in_time(work, seconds):
-    """Run work() on a worker thread and wait at most seconds for it. Socket timeouts only bound each step, so without
-    this a slow DNS lookup, a connect that tries one address after another, or a reply that trickles in could outlast
-    the call."""
+def in_time(work, seconds, late=OUT_OF_TIME):
+    """Run work() on a worker thread and wait at most seconds for it, or raise OutOfTime with the text late. Socket timeouts
+    only bound each step, so without this a slow DNS lookup, a connect that tries one address after another, or a reply
+    that trickles in could outlast the call."""
     outcome = {}
 
     def run():
@@ -210,7 +210,7 @@ def in_time(work, seconds):
     worker.start()
     worker.join(seconds)
     if worker.is_alive():
-        raise OutOfTime(OUT_OF_TIME)
+        raise OutOfTime(late)
     if "error" in outcome:
         raise outcome["error"]
     return outcome["value"]
@@ -588,6 +588,23 @@ def exchange(request, timeout):
         return error.code, error.headers, error.read().decode(errors="replace")
 
 
+def late_text(message, seconds):
+    """What to tell the agent when Genie didn't answer message in time. The request may have reached Genie, which keeps working
+    on a question after the bridge gives up, so asking again starts a duplicate. A call that carried the IDs of its answer gets
+    them back for polling; a question that was just asked has none, because they come in the reply that never arrived."""
+    params = message.get("params") if isinstance(message.get("params"), dict) else {}
+    arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
+    ids = (arguments.get("conversation_id"), arguments.get("response_id"))
+    text = "Genie didn't answer within {} seconds, so this call ran out of time.".format(seconds)
+    if all(isinstance(value, str) and value for value in ids):
+        return text + (" Genie may still be working on it, and asking the question again would start a duplicate: call "
+                       "genie_poll_response again with conversation_id {} and response_id {}.".format(*ids))
+    if params.get("name") == "genie_ask":
+        return text + (" Genie may still be working on the question, but no IDs came back to poll with, and asking again "
+                       "starts a duplicate question. Wait a minute or two, then try again.")
+    return text + " Try again."
+
+
 def forward(message, context):
     """POST one message to Genie One and return the JSON-RPC messages it answers with."""
     for attempt in (0, 1):
@@ -604,11 +621,10 @@ def forward(message, context):
         request = urllib.request.Request(context["url"], data=json.dumps(message).encode(), headers=headers, method="POST")
         host = display_host(context["url"])
         timeout = time_left(UPSTREAM_TIMEOUT_SECONDS)
-        late = ("Genie didn't answer within {} seconds. If you were waiting for an answer, poll again with the same IDs "
-                "instead of asking again.".format(int(timeout)))
+        late = late_text(message, int(timeout))
         unreachable = "Couldn't reach Genie at {}: {}. Check the network connection, and connect to the VPN if the workspace needs one."
         try:
-            status, response_headers, text = in_time(lambda: exchange(request, timeout), timeout)
+            status, response_headers, text = in_time(lambda: exchange(request, timeout), timeout, late)
         except urllib.error.URLError as error:
             raise BridgeError(late if isinstance(error.reason, socket.timeout) else unreachable.format(host, error.reason))
         except socket.timeout:
