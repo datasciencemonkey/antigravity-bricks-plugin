@@ -1,4 +1,4 @@
-"""The Databricks Genie plugin package: the files Antigravity 2.24.0 actually loads, and nothing it would drop or choke on."""
+"""The Databricks Genie plugin package: the files Antigravity actually loads, and nothing it would drop or choke on."""
 import importlib.util
 import json
 import re
@@ -10,14 +10,23 @@ from pathlib import Path
 
 import yaml
 
-PLUGIN = Path(__file__).resolve().parent.parent / "plugins" / "databricks-genie"
+REPO = Path(__file__).resolve().parent.parent
+PLUGIN = REPO / "plugins" / "databricks-genie"
 SKILL = "antigravity-databricks-genie"
 GENIE_ONE_TOOLS = ["genie_ask", "genie_poll_response", "genie_get_query_result", "genie_cancel_response"]
 STATUSES = ["ready", "not_configured", "login_needed", "login_in_progress", "login_failed", "cli_missing",
             "unsupported_auth", "profile_exists_unreadable"]
 WORKSPACE_LINE = "Asking Genie in <host> (Databricks CLI profile <profile>)"
-# The 2.24.0 loader reads only these keys; `author` and `homepage` are silently dropped.
+# The shipped loader reads only these keys. It silently drops everything else, including the metadata the publishing
+# guide asks for (`author`), recommends (`homepage`, `license`, `keywords`) or allows (`repository`).
 LOADER_KEYS = {"name", "description", "displayName", "logo", "suggestedPrompts", "version", "disabled", "skills"}
+# `agy plugin validate --strict` accepts those guide fields, so they may ride along. It rejects `category` and `tags`
+# (`unknown field ... is ignored`), which the guide also recommends, so they stay out.
+GUIDE_KEYS = {"author", "homepage", "keywords", "license", "repository"}
+AUTHOR = {"name": "Sathish Gangichetty", "url": "https://github.com/datasciencemonkey"}  # no email, on purpose
+# A prompt chip is the first message of a new chat, so none may lean on an earlier answer.
+BACK_REFERENCE = re.compile(r"\b(that|those|them|above|previous|earlier|again|same)\b", re.IGNORECASE)
+IDENTIFIER_CHARACTERS = re.compile(r"[`_.]")  # backticks, underscores and dots mark table, column and file names
 PLACEHOLDERS = {"PLUGIN_ROOT", "PLUGIN_DATA"}
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 PNG_RGBA = 6  # the IHDR color type for red, green, blue and alpha
@@ -41,8 +50,8 @@ def test_manifest_name_is_kebab_case_and_matches_the_plugin_folder():
     assert re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", manifest()["name"])
 
 
-def test_manifest_uses_only_keys_the_loader_reads():
-    assert set(manifest()) <= LOADER_KEYS
+def test_manifest_uses_only_keys_the_loader_reads_or_the_guide_asks_for_and_the_validator_accepts():
+    assert set(manifest()) <= LOADER_KEYS | GUIDE_KEYS
 
 
 def test_manifest_has_the_marketplace_presentation_fields():
@@ -51,6 +60,27 @@ def test_manifest_has_the_marketplace_presentation_fields():
     assert re.fullmatch(r"\d+\.\d+\.\d+", m["version"])
     assert 60 <= len(m["description"]) <= 160
     assert 1 <= len(m["suggestedPrompts"]) <= 3 and all(p.strip() for p in m["suggestedPrompts"])
+
+
+def test_the_manifest_names_its_author_with_a_name_and_a_url_but_no_email():
+    # The guide requires `author` for the Marketplace. The loader drops it, but the validator accepts it.
+    assert manifest()["author"] == AUTHOR
+
+
+def test_the_plugin_carries_the_repos_mit_license_and_the_manifest_says_so():
+    # A subfolder install copies only the plugin's folder, so the license text has to travel inside it.
+    assert manifest()["license"] == "MIT"
+    assert (PLUGIN / "LICENSE").read_text() == (REPO / "LICENSE").read_text()
+
+
+def test_each_suggested_prompt_works_on_its_own_in_a_new_chat_and_names_no_dataset():
+    prompts = manifest()["suggestedPrompts"]
+
+    assert len(prompts) == 3
+    for prompt in prompts:
+        assert "Genie" in prompt, prompt
+        assert not BACK_REFERENCE.search(prompt), prompt
+        assert not IDENTIFIER_CHARACTERS.search(prompt), prompt
 
 
 def test_logo_is_a_bundled_square_rgba_png_of_at_least_128_pixels():
@@ -293,6 +323,19 @@ def test_readme_explains_how_to_switch_cli_profiles():
     assert "export DATABRICKS_CONFIG_PROFILE=<name>" in readme
     assert "launchctl setenv DATABRICKS_CONFIG_PROFILE <name>" in readme
     assert "launchctl unsetenv DATABRICKS_CONFIG_PROFILE" in readme
+
+
+def test_readme_try_it_lists_the_manifests_suggested_prompts_word_for_word():
+    readme = readme_text()
+
+    for prompt in manifest()["suggestedPrompts"]:
+        assert f'- "{prompt}"' in readme
+
+
+def test_readme_names_the_license():
+    readme = readme_text()
+
+    assert "## License" in readme and "MIT" in readme
 
 
 def test_the_skill_quotes_the_line_the_bridge_adds_to_each_genie_ask_result():
