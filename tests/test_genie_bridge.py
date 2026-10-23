@@ -1412,6 +1412,16 @@ def azure_service_principal(profile):
             f"azure_client_id = 1111\nazure_client_secret = {SECRET}\nazure_tenant_id = 2222\n")
 
 
+def headerless_service_principal():
+    """The same keys with no header at all, which the CLI's INI parser puts in DEFAULT."""
+    return azure_service_principal("x").split("\n", 1)[1]
+
+
+# What `databricks configure --host <host> --profile dev` wrote into a new config file (CLI v1.22.1), token made up.
+CONFIGURE_LAYOUT = ("; The profile defined in the DEFAULT section is to be used as a fallback when no profile is explicitly "
+                    f"specified.\n[DEFAULT]\n\n[dev]\nhost = {WORKSPACE}\ntoken = made-up-token\n\n[__settings__]\ndefault_profile = dev\n")
+
+
 @pytest.mark.parametrize("profile", ["NEW", "DEFAULT"])  # [DEFAULT] is the section that configparser leaves out of its list
 def test_genie_setup_never_signs_in_over_a_config_section_the_cli_does_not_list(start, cli, profile):
     # `auth login` would rewrite that section and drop its client secret.
@@ -1481,19 +1491,109 @@ def test_genie_setup_still_signs_in_again_a_profile_the_cli_lists_when_the_confi
     assert cli.logins() == [f"auth login --host {WORKSPACE} --profile DEMO --timeout 5m"]
 
 
-def test_lists_only_the_section_names_in_a_config_file(tmp_path):
-    bridge = load_bridge()
+def test_reads_each_sections_key_names_and_never_a_value(tmp_path):
     path = tmp_path / "databrickscfg"
     path.write_bytes(
-        b"\xef\xbb\xbf[DEFAULT]\r\nhost = https://x\r\n\r\n  [ spaced ]  \r\n"
-        + f"token = {SECRET}\r\n[note] # a comment\r\n# [commented]\r\n; [also commented]\r\nkey = [not-a-section]\r\n".encode()
-        + b"[dev.eu]\r\nbad = \xff\xfe\r\n"
+        b"\xef\xbb\xbf; a comment before any header, with [brackets] in it\r\norphan = before the first header\r\n"
+        b"[DEFAULT]\r\nhost = https://x\r\n\r\n  [ spaced ]  \r\n"
+        + f"token = {SECRET}\r\n[note] # a comment\r\n# [commented]\r\n; [also commented]\r\nkey: {SECRET}\r\n".encode()
+        + b"[empty]\r\n[dev.eu]\r\nbad = \xff\xfe\r\n"
+        + f"no delimiter {SECRET}\r\n[note]\r\nlater = 1\r\n".encode()
     )
 
-    names = bridge.config_sections(path)
+    sections = load_bridge().config_sections(path)
 
-    assert names == ["DEFAULT", "spaced", "note", "dev.eu"]
-    assert SECRET not in repr(names)
+    # Keys before the first header are DEFAULT's, a section named twice is one section, and a line with no delimiter is a
+    # key with no name: its text could be part of a value.
+    assert sections == {"DEFAULT": ["orphan", "host"], "spaced": ["token"], "note": ["key", "later"], "empty": [],
+                        "dev.eu": ["bad", ""]}
+    assert SECRET not in repr(sections)
+
+
+def test_default_is_a_section_only_when_it_has_a_header_or_a_key(tmp_path):
+    path = tmp_path / "databrickscfg"
+    path.write_text(f"[dev]\nhost = {WORKSPACE}\n")
+    assert load_bridge().config_sections(path) == {"dev": ["host"]}
+
+    path.write_text(f"[DEFAULT]\n\n[dev]\nhost = {WORKSPACE}\n")
+    assert load_bridge().config_sections(path) == {"DEFAULT": [], "dev": ["host"]}
+
+
+@pytest.mark.parametrize("config, profile, holds", [
+    pytest.param(None, "NEW", False, id="no config file"),
+    pytest.param("", "NEW", False, id="an empty file"),
+    pytest.param("[NEW]\n# a comment\n; another\n", "NEW", False, id="a header with no keys"),
+    pytest.param("[NEW]\nkey = value\n", "NEW", True, id="a key under the header"),
+    pytest.param("[OTHER]\nkey = value\n", "NEW", False, id="keys under another header"),
+    pytest.param("[DEFAULT]\n\n[dev]\nhost = x\n", "DEFAULT", False, id="an empty DEFAULT header"),
+    pytest.param("key = value\n", "DEFAULT", True, id="a key before the first header is DEFAULT's"),
+    pytest.param("key = value\n", "NEW", False, id="and not another profile's"),
+    pytest.param("a folder", "NEW", True, id="a file that cannot be read"),
+])
+def test_a_profile_holds_settings_when_the_config_file_has_a_key_under_its_name(tmp_path, config, profile, holds):
+    path = tmp_path / "databrickscfg"
+    if config == "a folder":
+        path.mkdir()
+    elif config is not None:
+        path.write_text(config)
+    cli = load_bridge().DatabricksCli({"DATABRICKS_CONFIG_PROFILE": profile, "DATABRICKS_CONFIG_FILE": str(path)})
+
+    assert cli.has_config_keys() is holds
+
+
+@pytest.mark.parametrize("config, profile, status", [
+    pytest.param(CONFIGURE_LAYOUT, "DEFAULT", "not_configured", id="the empty DEFAULT header configure writes"),
+    pytest.param("[DEFAULT]\n", "DEFAULT", "not_configured", id="an empty DEFAULT header"),
+    pytest.param("[NEW]\n", "NEW", "not_configured", id="an empty named section"),
+    pytest.param(headerless_service_principal(), "DEFAULT", "profile_exists_unreadable", id="service principal keys with no header"),
+    pytest.param(azure_service_principal("NEW"), "NEW", "profile_exists_unreadable", id="a named service principal"),
+])
+def test_genie_connection_reads_what_the_cli_writes_and_hides(start, cli, any_cli, config, profile, status):
+    # Run on the stand-in and on the real CLI. Only a hidden section with keys in it has anything for a sign-in to lose.
+    cli.set_config(config)
+    bridge = start(DATABRICKS_CLI=any_cli, DATABRICKS_CONFIG_PROFILE=profile)
+    _, report = bridge.connection(3)
+
+    assert report["status"] == status
+
+
+@pytest.mark.parametrize("config, profile", [
+    pytest.param(CONFIGURE_LAYOUT, "DEFAULT", id="the empty DEFAULT header configure writes"),
+    pytest.param("[DEFAULT]\n# nothing in it\n", "DEFAULT", id="an empty DEFAULT header with a comment"),
+    pytest.param("[NEW]\n", "NEW", id="an empty named section"),
+])
+def test_genie_setup_signs_a_profile_in_when_its_hidden_section_has_no_keys(start, cli, config, profile):
+    # `databricks configure` leaves an empty [DEFAULT] header in a new config. There is nothing in it to lose.
+    cli.set_config(config)
+    bridge = start(DATABRICKS_CONFIG_PROFILE=profile)
+    bridge.send(call("genie_setup", {"workspace_url": WORKSPACE}))
+    reply = bridge.reply()
+
+    assert "isError" not in reply["result"], text_of(reply)
+    assert report_of(reply)["status"] == "login_in_progress"
+    _, after = wait_for_sign_in_to_end(bridge)
+
+    assert cli.logins() == [f"auth login --host {WORKSPACE} --profile {profile} --timeout 5m"]
+    assert after["status"] == "ready"
+
+
+@pytest.mark.parametrize("config", [
+    pytest.param(headerless_service_principal(), id="keys only"),
+    pytest.param(headerless_service_principal() + f"\n[dev]\nhost = {WORKSPACE}\nauth_type = databricks-cli\n", id="and another profile after them"),
+    pytest.param(headerless_service_principal() + "\n[DEFAULT]\n", id="and an empty DEFAULT header after them"),
+])
+def test_genie_setup_never_signs_in_over_keys_that_come_before_the_first_header(start, cli, config):
+    # The CLI's INI parser puts those keys in DEFAULT, and `auth login --profile DEFAULT` would drop the client secret.
+    cli.set_config(config)
+    before = cli.config.read_text()
+    bridge = start(DATABRICKS_CONFIG_PROFILE="DEFAULT")
+    bridge.send(call("genie_setup", {"workspace_url": WORKSPACE}))
+    reply = bridge.reply()
+    time.sleep(0.3)
+
+    assert cli.logins() == []
+    assert cli.config.read_text() == before and SECRET in cli.config.read_text()
+    assert reply["result"]["isError"] is True and "won't touch" in text_of(reply)
 
 
 PAGE = "<html><body>Sign in to continue</body></html>"  # what a proxy or a single sign-on page answers with, status 200
@@ -1699,15 +1799,6 @@ def listed_profiles(binary, cli, config):
     result = run_cli(binary, cli, "auth", "profiles", "--skip-validate", "--output", "json")
     assert result.returncode == 0, result.stderr
     return [(profile["name"], profile.get("host")) for profile in json.loads(result.stdout)["profiles"] or []]
-
-
-# What `databricks configure --host <host> --profile dev` wrote into a new config file (CLI v1.22.1), token made up.
-CONFIGURE_LAYOUT = ("; The profile defined in the DEFAULT section is to be used as a fallback when no profile is explicitly "
-                    f"specified.\n[DEFAULT]\n\n[dev]\nhost = {WORKSPACE}\ntoken = made-up-token\n\n[__settings__]\ndefault_profile = dev\n")
-
-
-def headerless_service_principal():
-    return azure_service_principal("x").split("\n", 1)[1]  # the keys without the [x] header
 
 
 @pytest.mark.parametrize("config, expected", [

@@ -149,16 +149,28 @@ def config_file(env):
     return os.path.join(home, path[1:].lstrip("/\\")) if path.startswith("~") else path  # the CLI expands a leading ~
 
 
+KEY_NAME = re.compile(r"([^=:]*)[=:]")  # the CLI's INI parser ends a key at the first = or :
+
+
 def config_sections(path):
-    """The section names in an INI config file, and nothing else: no value, which may be a secret, is parsed or kept.
-    (configparser would parse every value, and it leaves [DEFAULT] out of its sections.)"""
-    names = []
+    """The sections of an INI config file, as {name: key names}. Only the names are kept: no value, which may be a secret, is
+    parsed or stored, and a line with no delimiter gets an empty name, because its text could be part of a value. Keys before
+    the first header belong to DEFAULT, as in the CLI's INI parser. (configparser would parse every value, and it leaves
+    [DEFAULT] out of its sections.)"""
+    sections = {}
+    current = "DEFAULT"
     with open(path, encoding="utf-8-sig", errors="replace") as file:
         for line in file:
             line = line.strip()
+            if not line or line[0] in "#;":
+                continue
             if line.startswith("[") and "]" in line:
-                names.append(line[1:line.index("]")].strip())
-    return names
+                current = line[1:line.index("]")].strip()
+                sections.setdefault(current, [])
+            else:
+                key = KEY_NAME.match(line)
+                sections.setdefault(current, []).append(key.group(1).strip() if key else "")
+    return sections
 
 
 class BridgeError(Exception):
@@ -268,11 +280,13 @@ class DatabricksCli:
     def own_profile(self):
         return next((item for item in self.profiles() if item["name"] == self.profile), None)
 
-    def in_config_file(self):
-        """Whether the config file has a section named like the profile, even one that `auth profiles` hides: it lists only
-        sections with a host or an account_id. A file that can't be read counts as yes, so nothing is signed in over it."""
+    def has_config_keys(self):
+        """Whether the config file holds settings for the profile: a key in a section named like it, even a section that
+        `auth profiles` hides because it has no host or account_id. Signing in over those would rewrite them and drop a secret.
+        An empty header, like the [DEFAULT] one that `databricks configure` writes, holds nothing to lose. A file that can't be
+        read counts as holding settings, so nothing is signed in over it."""
         try:
-            return self.profile in config_sections(config_file(self.env))
+            return bool(config_sections(config_file(self.env)).get(self.profile))
         except FileNotFoundError:
             return False
         except OSError:
@@ -456,7 +470,7 @@ def next_step(status, profile, host, url, profiles, auth_type=None):
                 "a separate U2M profile: set DATABRICKS_CONFIG_PROFILE to a new profile name, restart Antigravity, and "
                 "give you the workspace URL for genie_setup. Never change this profile for them.".format(profile, method))
     if status == "profile_exists_unreadable":
-        return ("Databricks CLI profile {0} has a section in the Databricks config file that `databricks auth profiles` doesn't "
+        return ("Databricks CLI profile {0} has settings in the Databricks config file that `databricks auth profiles` doesn't "
                 "list (usually because it has no host, as with an Azure service principal that sets azure_workspace_resource_id), "
                 "or that file can't be read. Genie can't tell how the profile signs in, and signing it in again would rewrite it "
                 "and drop its secret, so genie_setup won't touch it. The user can set up a separate profile: set "
@@ -509,7 +523,7 @@ def connection(context):
         own = next((item for item in profiles if item["name"] == cli.profile), None)
         if own is not None and own["auth_type"] != U2M:  # `auth token` is U2M-only, so it always fails for these
             return report(context, "unsupported_auth", own["host"], auth_type=own["auth_type"])
-        if own is None and cli.in_config_file():  # `auth login` would rewrite a section the CLI doesn't list, and drop its secret
+        if own is None and cli.has_config_keys():  # `auth login` would rewrite keys the CLI doesn't list, and drop a secret
             return report(context, "profile_exists_unreadable")
         if login is not None:
             return report(context, "login_failed", login["host"])
