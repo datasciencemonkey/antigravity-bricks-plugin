@@ -16,6 +16,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PLUGIN = REPO_ROOT / "plugins" / "databricks-genie"
 
 
+def component_names(folder, folders_only=False):
+    """What a plugin folder holds, by name. Dotfiles are left out: the Finder drops a .DS_Store into any folder it opens,
+    and agy doesn't list it as a skill or a rule."""
+    return sorted(
+        path.name for path in folder.iterdir()
+        if not path.name.startswith(".") and (path.is_dir() or not folders_only)
+    )
+
+
 def find_agy():
     fallback = Path.home() / ".local" / "bin" / "agy"  # where the installer puts it, before a new shell has it on PATH
     return shutil.which("agy") or (str(fallback) if fallback.is_file() else None)
@@ -56,6 +65,18 @@ def agy(tmp_path):
     return cli
 
 
+def test_component_names_leave_out_dotfiles_such_as_the_ds_store_the_finder_leaves_behind(tmp_path):
+    (tmp_path / "skills" / "real-skill").mkdir(parents=True)
+    (tmp_path / "skills" / ".DS_Store").write_text("")
+    (tmp_path / "skills" / "stray.txt").write_text("")
+    (tmp_path / "rules").mkdir()
+    (tmp_path / "rules" / "AGENTS.md").write_text("")
+    (tmp_path / "rules" / ".DS_Store").write_text("")
+
+    assert component_names(tmp_path / "skills", folders_only=True) == ["real-skill"]
+    assert component_names(tmp_path / "rules") == ["AGENTS.md"]
+
+
 def test_installing_the_repo_gives_the_plugin_its_skill_rule_and_mcp_server_at_the_current_version(agy):
     installed = agy.run("plugin", "install", str(REPO_ROOT))
     assert installed.returncode == 0, installed.stdout + installed.stderr
@@ -66,8 +87,8 @@ def test_installing_the_repo_gives_the_plugin_its_skill_rule_and_mcp_server_at_t
     assert plugin["version"] == json.loads((PLUGIN / "plugin.json").read_text())["version"]
     assert plugin["enabled"] is True
     # agy leaves "skills" out of its report when it loaded none (seen with a skill whose frontmatter it couldn't read).
-    assert sorted(plugin.get("skills", [])) == sorted(p.name for p in (PLUGIN / "skills").iterdir() if p.is_dir())
-    assert sorted(plugin.get("rules", [])) == sorted(p.name for p in (PLUGIN / "rules").iterdir())
+    assert sorted(plugin.get("skills", [])) == component_names(PLUGIN / "skills", folders_only=True)
+    assert sorted(plugin.get("rules", [])) == component_names(PLUGIN / "rules")
     servers = json.loads((PLUGIN / "mcp_config.json").read_text())["mcpServers"]
     assert sorted(plugin.get("mcpServers", [])) == sorted(servers)
     assert Path(plugin["path"]).resolve().is_relative_to(agy.home.resolve())  # it went into the temporary HOME

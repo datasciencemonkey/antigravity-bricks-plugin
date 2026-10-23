@@ -15,3 +15,6 @@ Antigravity Plugin Marketplace Publishing Guide.pdf
 
 # Python bytecode (uv's .venv and pytest's cache ignore themselves)
 __pycache__/
+
+# macOS Finder metadata, which can appear in any folder, the plugin's included
+.DS_Store

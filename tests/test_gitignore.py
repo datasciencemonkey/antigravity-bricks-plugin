@@ -1,6 +1,10 @@
+from pathlib import Path
+
 import pytest
 
 from tools import repo_checks
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 SUPERSET_HOOKS = ".github/hooks/superset-notify.json"  # the Superset app writes this into every worktree
 CLAUDE_AGENTS = ".claude/agents/"  # dev-loop subagent definitions: kept on disk, never shipped
@@ -60,3 +64,11 @@ def test_tolerates_windows_line_endings_and_surrounding_spaces():
     text = "".join(f"  {entry}  \r\n" for entry in REQUIRED)
 
     assert repo_checks.find_missing_gitignore_entries(text) == []
+
+
+def test_finder_metadata_is_git_ignored_so_a_stray_ds_store_cannot_break_the_plugin_tests():
+    # A Finder-made .DS_Store inside plugins/databricks-genie/ is an untracked file there. Without this entry it fails the
+    # version gate (an untracked file counts as a change) on a checkout that has changed nothing.
+    entries = {line.strip() for line in (REPO_ROOT / ".gitignore").read_text().splitlines()}
+
+    assert ".DS_Store" in entries
