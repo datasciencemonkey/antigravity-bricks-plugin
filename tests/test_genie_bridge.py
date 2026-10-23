@@ -2,11 +2,13 @@
 
 Runs the real bridge under Python against a stand-in `databricks` CLI and a stand-in Genie MCP server.
 """
+import ast
 import importlib.util
 import io
 import json
 import os
 import queue
+import re
 import signal
 import subprocess
 import threading
@@ -573,7 +575,7 @@ def test_genie_connection_reports_ready_with_the_profile_and_the_host(start, gen
     assert report["status"] == "ready"
     assert report["profile"] == "DEMO"
     assert report["host"] == genie.host
-    assert f"Asking Genie in {genie.host} (CLI profile DEMO)" in report["next_step"]
+    assert f"Asking Genie in {genie.host} (Databricks CLI profile DEMO)" in report["next_step"]
 
 
 @pytest.mark.parametrize("where", ["GENIE_MCP_URL", "DATABRICKS_HOST", "both", "profile"])
@@ -653,6 +655,16 @@ def test_a_cli_that_is_not_installed_anywhere_is_reported_as_missing(monkeypatch
     assert bridge.connection(context)["status"] == "cli_missing"
 
 
+def test_the_bridge_says_databricks_cli_profile_wherever_it_tells_the_user_about_one():
+    # "CLI profile" alone could be read as a setting of Antigravity's own `agy` CLI. Docstrings aren't shown to anyone.
+    tree = ast.parse(BRIDGE.read_text())
+    docstrings = {id(node.value) for node in ast.walk(tree) if isinstance(node, ast.Expr)}
+    texts = [node.value for node in ast.walk(tree)
+             if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings]
+
+    assert [text for text in texts if re.search(r"(?<!Databricks )CLI profile", text)] == []
+
+
 def test_its_own_tools_are_answered_by_the_bridge_and_never_sent_to_genie(start, genie):
     bridge = start()
     bridge.send(TOOLS_LIST)
@@ -691,7 +703,7 @@ def test_first_use_sets_up_the_profile_then_connects_and_tells_antigravity_the_t
     assert notifications == [LIST_CHANGED]
     assert report["status"] == "ready" and report["profile"] == "NEW"
     assert genie.requests[-1]["body"]["params"]["name"] == "genie_ask"
-    assert f"Asked Genie in {genie.host} (CLI profile NEW)" in text_of(ask)
+    assert f"Asked Genie in {genie.host} (Databricks CLI profile NEW)" in text_of(ask)
 
 
 def test_tells_antigravity_the_tools_changed_after_a_sign_in_even_if_it_never_listed_them(start, cli):
@@ -894,7 +906,7 @@ def test_adds_the_workspace_line_to_each_genie_ask_result_only(start, genie):
     poll = bridge.reply()
 
     assert ask["result"]["content"] == [{"type": "text", "text": "status: in_progress"},
-                                        {"type": "text", "text": f"Asked Genie in {genie.host} (CLI profile DEMO)"}]
+                                        {"type": "text", "text": f"Asked Genie in {genie.host} (Databricks CLI profile DEMO)"}]
     assert poll["result"]["content"] == [{"type": "text", "text": "status: in_progress"}]
 
 

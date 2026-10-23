@@ -19,10 +19,10 @@ Work is tracked as issues on the [project board](https://github.com/users/datasc
 The MVP is done when each of these is shown working:
 
 1. The plugin works from all three Antigravity surfaces: the `agy` CLI, the desktop app and the IDE (#30).
-2. On every surface, if the CLI profile isn't configured, the agent asks the user for their workspace details (#33).
-3. It uses those details to set up the CLI profile (#33).
-4. It then uses that profile to connect to the Genie MCP server (#33).
-5. Before each Genie request, it shows the workspace host and profile (#33).
+2. On every surface, if the Databricks CLI profile isn't configured, the agent asks the user for their workspace details (#33).
+3. It uses those details to set up the Databricks CLI profile (#33).
+4. It then uses that Databricks CLI profile to connect to the Genie MCP server (#33).
+5. Before each Genie request, it shows the workspace host and the Databricks CLI profile (#33).
 6. It's hardened, and it meets the plugin requirements in the publishing guide. Where the guide and the shipped app disagree, it follows the app and says why (#34).
 
 Until then, everything else waits. Issues labeled `later` on the board are parked.

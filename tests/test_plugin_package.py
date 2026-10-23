@@ -14,7 +14,7 @@ SKILL = "antigravity-databricks-genie"
 GENIE_ONE_TOOLS = ["genie_ask", "genie_poll_response", "genie_get_query_result", "genie_cancel_response"]
 STATUSES = ["ready", "not_configured", "login_needed", "login_in_progress", "login_failed", "cli_missing",
             "unsupported_auth"]
-WORKSPACE_LINE = "Asking Genie in <host> (CLI profile <profile>)"
+WORKSPACE_LINE = "Asking Genie in <host> (Databricks CLI profile <profile>)"
 # The 2.24.0 loader reads only these keys; `author` and `homepage` are silently dropped.
 LOADER_KEYS = {"name", "description", "displayName", "logo", "suggestedPrompts", "version", "disabled", "skills"}
 PLACEHOLDERS = {"PLUGIN_ROOT", "PLUGIN_DATA"}
@@ -277,7 +277,12 @@ def test_readme_explains_how_to_switch_cli_profiles():
 
 
 def test_the_skill_quotes_the_line_the_bridge_adds_to_each_genie_ask_result():
-    assert "Asked Genie in <host> (CLI profile <profile>)" in skill_text()
+    assert "Asked Genie in <host> (Databricks CLI profile <profile>)" in skill_text()
+
+
+def test_the_plugin_docs_say_databricks_cli_profile_so_nobody_reads_it_as_an_agy_setting():
+    for document in ("README.md", "rules/AGENTS.md", f"skills/{SKILL}/SKILL.md"):
+        assert re.findall(r"(?<!Databricks )CLI profile", (PLUGIN / document).read_text()) == [], document
 
 
 def test_the_skill_leaves_a_profile_that_signs_in_another_way_alone():

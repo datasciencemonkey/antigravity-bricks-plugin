@@ -40,8 +40,8 @@ TOOLS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "genie_too
 INSTRUCTIONS = (
     "Databricks Genie answers questions about the user's data in their Databricks workspace. Call genie_connection "
     "once per conversation before the first question, and follow its next_step. Before each genie_ask, tell the user "
-    "\"Asking Genie in <host> (CLI profile <profile>)\". Use genie_ask to start a question and genie_poll_response to "
-    "get the answer. Never pick a workspace URL or a CLI profile for the user."
+    "\"Asking Genie in <host> (Databricks CLI profile <profile>)\". Use genie_ask to start a question and "
+    "genie_poll_response to get the answer. Never pick a workspace URL or a Databricks CLI profile for the user."
 )
 CLI_SIGN_IN = (
     "Genie signs in through the Databricks CLI, the safest way to run OAuth U2M (user-to-machine) sign-in from their "
@@ -59,9 +59,9 @@ BRIDGE_TOOLS = [
         "description": (
             "Check the Databricks connection Genie uses. Call it once per conversation before the first genie_ask, "
             "and again to follow a sign-in that genie_setup started. Returns JSON: status (ready, not_configured, "
-            "login_needed, login_in_progress, login_failed, unsupported_auth or cli_missing), the CLI profile, the "
-            "workspace host, and next_step, which says what to do. When the profile isn't set up, it also lists the "
-            "CLI's other profiles."
+            "login_needed, login_in_progress, login_failed, unsupported_auth or cli_missing), the Databricks CLI "
+            "profile, the workspace host, and next_step, which says what to do. When the profile isn't set up, it also "
+            "lists the Databricks CLI's other profiles."
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
@@ -378,34 +378,35 @@ def clear_login(context):
 def next_step(status, profile, host, url, profiles, auth_type=None):
     """What the agent should do next. host is what the bridge calls; url is the workspace to sign in to."""
     if status == "ready":
-        return "Before each genie_ask, tell the user \"Asking Genie in {} (CLI profile {})\".".format(host, profile)
+        return "Before each genie_ask, tell the user \"Asking Genie in {} (Databricks CLI profile {})\".".format(
+            host, profile)
     if status == "cli_missing":
         return ("The Databricks CLI isn't installed. Offer to install it with Databricks' official installer, and run "
                 "the installer only after the user approves; never install it silently. When you ask, explain that "
                 "{} Official installers: {}. Then call genie_connection again.".format(CLI_SIGN_IN, INSTALLERS))
     if status == "not_configured":
-        step = ("CLI profile {} isn't set up yet. Ask the user for their Databricks workspace URL, such as "
+        step = ("Databricks CLI profile {} isn't set up yet. Ask the user for their Databricks workspace URL, such as "
                 "https://<workspace>.cloud.databricks.com, and never guess one. Explain that {} A browser window will "
                 "open for them to sign in. Then call genie_setup with the URL they give.".format(profile, CLI_SIGN_IN))
         if profiles:
-            step += (" The CLI has other profiles, listed in profiles. If the user would rather use one of them, they "
+            step += (" The Databricks CLI has other profiles, listed in profiles. If the user would rather use one of them, they "
                      "can set DATABRICKS_CONFIG_PROFILE to its name and restart Antigravity. Only profiles with auth_type "
                      "databricks-cli (OAuth U2M) work here, and never pick one for them.")
         return step
     if status == "unsupported_auth":
         method = "auth type " + auth_type if auth_type else "no auth type in its config (often a personal access token)"
-        return ("CLI profile {} signs in with {}, not OAuth U2M. Genie in Antigravity signs in with OAuth U2M through "
+        return ("Databricks CLI profile {} signs in with {}, not OAuth U2M. Genie in Antigravity signs in with OAuth U2M through "
                 "the Databricks CLI, so it can't use this profile, and genie_setup won't change it. The user can set up "
                 "a separate U2M profile: set DATABRICKS_CONFIG_PROFILE to a new profile name, restart Antigravity, and "
                 "give you the workspace URL for genie_setup. Never change this profile for them.".format(profile, method))
     if status == "login_needed":
         if not url:
-            return ("CLI profile {0} has no workspace URL. Ask the user to fix it in a terminal: "
+            return ("Databricks CLI profile {0} has no workspace URL. Ask the user to fix it in a terminal: "
                     "databricks auth login --profile {0}".format(profile))
-        return ("The Databricks sign-in for CLI profile {} ({}) has expired. Tell the user a browser window will open "
+        return ("The sign-in for Databricks CLI profile {} ({}) has expired. Tell the user a browser window will open "
                 "for them to sign in again, then call genie_setup with {}.".format(profile, url, url))
     if status == "login_in_progress":
-        return ("A browser window is open for the user to sign in to {} (CLI profile {}). Ask them to finish signing "
+        return ("A browser window is open for the user to sign in to {} (Databricks CLI profile {}). Ask them to finish signing "
                 "in there, then call genie_connection again. A sign-in left unfinished gives up after {} minutes."
                 .format(url, profile, LOGIN_TIMEOUT_MINUTES))
     return ("The sign-in to {} didn't finish: it was cancelled in the browser, timed out, or failed. Ask the user "
@@ -458,7 +459,7 @@ def connection(context):
         if not url:
             own = cli.own_profile()
             if not own or not own["host"]:
-                raise BridgeError("CLI profile {0} has no workspace URL. Ask the user to fix it in a terminal: "
+                raise BridgeError("Databricks CLI profile {0} has no workspace URL. Ask the user to fix it in a terminal: "
                                   "databricks auth login --profile {0}".format(cli.profile))
             url = genie_url(own["host"])
         context.update(url=url, session_id=None, session_started=False, ready=True)
@@ -481,8 +482,9 @@ def setup(arguments, context):
     if own is not None:
         if not own["host"] or urllib.parse.urlsplit(base_url(own["host"])).hostname != urllib.parse.urlsplit(url).hostname:
             raise BridgeError(
-                "CLI profile {} is already set up for {}, and genie_setup never changes which workspace a profile points "
-                "to. To use {}, the user can set DATABRICKS_CONFIG_PROFILE to a new profile name and restart Antigravity."
+                "Databricks CLI profile {} is already set up for {}, and genie_setup never changes which workspace a "
+                "profile points to. To use {}, the user can set DATABRICKS_CONFIG_PROFILE to a new profile name and "
+                "restart Antigravity."
                 .format(cli.profile, base_url(own["host"]) if own["host"] else "no workspace", url))
         if state["status"] == "ready":
             return state
@@ -492,7 +494,7 @@ def setup(arguments, context):
         return state
     if not PROFILE_NAME.fullmatch(cli.profile):
         raise BridgeError(
-            "The CLI profile name {!r} can only use letters, digits, '.', '_' and '-', up to 64 of them. Ask the user to "
+            "The Databricks CLI profile name {!r} can only use letters, digits, '.', '_' and '-', up to 64 of them. Ask the user to "
             "set DATABRICKS_CONFIG_PROFILE to a simpler name and restart Antigravity.".format(cli.profile))
     process = cli.login(url)
     record = {"pid": process.pid, "profile": cli.profile, "host": url, "started": time.time()}
@@ -677,7 +679,7 @@ def call_tool(message, context):
     replies = call_upstream(message, context)
     result = matching_result(replies, message)
     if name == "genie_ask" and result is not None and isinstance(result.get("content"), list):
-        result["content"].append({"type": "text", "text": "Asked Genie in {} (CLI profile {})".format(state["host"], state["profile"])})
+        result["content"].append({"type": "text", "text": "Asked Genie in {} (Databricks CLI profile {})".format(state["host"], state["profile"])})
     return replies
 
 

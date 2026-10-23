@@ -4,7 +4,7 @@ Ask Databricks Genie about your governed data from Antigravity's agent, and turn
 
 ## What's inside
 
-- **A local Genie bridge** (`scripts/genie_bridge.py`), a small Python script that uses only the standard library. It connects Antigravity to the Genie One MCP server in your workspace and signs every request with a fresh token from your Databricks CLI login. No tokens are stored in Antigravity's settings. It adds two tools of its own: `genie_connection` shows which workspace and CLI profile Genie uses, and `genie_setup` sets up the CLI profile on first use.
+- **A local Genie bridge** (`scripts/genie_bridge.py`), a small Python script that uses only the standard library. It connects Antigravity to the Genie One MCP server in your workspace and signs every request with a fresh token from your Databricks CLI login. No tokens are stored in Antigravity's settings. It adds two tools of its own: `genie_connection` shows which workspace and Databricks CLI profile Genie uses, and `genie_setup` sets up the Databricks CLI profile on first use.
 - **The `antigravity-databricks-genie` skill.** It teaches the agent how to connect, ask Genie, wait for the answer, and use Genie's SQL.
 - **An always-on rule.** It sends data questions to Genie instead of guesswork.
 
@@ -30,13 +30,13 @@ The plugin uses your `DEFAULT` Databricks CLI profile. The first time you ask Ge
 1. The agent checks the connection with `genie_connection`. If the profile is signed in, it goes straight to Genie.
 2. If the profile isn't set up, the agent asks for your workspace URL, such as `https://<workspace>.cloud.databricks.com`. It never guesses one, and never picks a profile for you.
 3. It calls `genie_setup`, which runs `databricks auth login` for that workspace, and a browser window opens. Sign in with your usual single sign-on and MFA. There's no token to create or paste.
-4. Once you're signed in, Genie answers. Before each question, the agent says where it's asking, for example "Asking Genie in <host> (CLI profile DEFAULT)".
+4. Once you're signed in, Genie answers. Before each question, the agent says where it's asking, for example "Asking Genie in <host> (Databricks CLI profile DEFAULT)".
 
 When a sign-in expires, the agent signs you in again to the same workspace. `genie_setup` never changes which workspace an existing profile points to. You can also sign in yourself: `databricks auth login --host https://<workspace>.cloud.databricks.com` creates the `DEFAULT` profile.
 
 The setup lives only in the Databricks CLI's own config, so the Antigravity CLI, the desktop app and the IDE all use the same profile.
 
-## Use another CLI profile
+## Use another Databricks CLI profile
 
 Set `DATABRICKS_CONFIG_PROFILE` to the profile's name in the environment Antigravity starts from:
 
