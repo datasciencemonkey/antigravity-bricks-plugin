@@ -504,14 +504,15 @@ def test_asks_the_cli_for_a_new_token_shortly_before_the_old_one_expires(start, 
 # Starting with no CLI profile: the bridge answers initialize and tools/list itself
 
 
-@pytest.mark.parametrize("version", ["2025-06-18", "2025-03-26"])
-def test_answers_initialize_itself_so_it_starts_with_no_profile_configured(start, genie, cli, version):
+@pytest.mark.parametrize("asked, answered", [("2025-06-18", "2025-06-18"), ("2025-03-26", "2025-03-26"),
+                                             ("2024-11-05", "2024-11-05"), ("2099-01-01", "2025-06-18")])
+def test_answers_initialize_itself_so_it_starts_with_no_profile_configured(start, genie, cli, asked, answered):
     cli.set_profiles({})
     bridge = start(DATABRICKS_CONFIG_PROFILE="NEW")
-    bridge.send({**INITIALIZE, "params": {**INITIALIZE["params"], "protocolVersion": version}})
+    bridge.send({**INITIALIZE, "params": {**INITIALIZE["params"], "protocolVersion": asked}})
     result = bridge.reply()["result"]
 
-    assert result["protocolVersion"] == version
+    assert result["protocolVersion"] == answered  # a version the bridge knows, never just an echo
     assert result["capabilities"]["tools"] == {"listChanged": True}
     assert result["serverInfo"]["name"] == "databricks-genie-bridge"
     assert "genie_connection" in result["instructions"]
@@ -832,7 +833,8 @@ def test_accepts_databricks_workspace_urls_on_every_cloud_and_keeps_only_the_hos
     "https://{host}.example.test",  # a Databricks name in front of another domain
     "https://example.test/{host}",  # a Databricks name in the path only
     "https://{domain}",  # the domain with no workspace in front
-    "https://accounts.{domain}",  # the account console, not a workspace
+    "https://accounts.{domain}",  # the account consoles, not workspaces
+    "https://accounts-dod.{gov}",
     "https://login.databricks.com",
     "https://{label}.databricks.com",  # not a workspace domain
     "https://{label}_x.{domain}",  # not a valid host name
@@ -843,7 +845,8 @@ def test_accepts_databricks_workspace_urls_on_every_cloud_and_keeps_only_the_hos
 ])
 def test_refuses_urls_that_are_not_a_databricks_workspace(typed):
     bridge = load_bridge()
-    text = typed.format(host="company-workspace.cloud.databricks.com", domain="cloud.databricks.com", label="workspace")
+    text = typed.format(host="company-workspace.cloud.databricks.com", domain="cloud.databricks.com", label="workspace",
+                        gov="cloud.databricks.us")
 
     with pytest.raises(bridge.BridgeError):
         bridge.workspace_url(text)
@@ -1110,7 +1113,7 @@ def test_gives_subprocess_run_the_cli_timeout(monkeypatch):
     assert timeouts == [7]
 
 
-# Review fixes: profiles that sign in another way, sign-ins that outlive the bridge, and tool lists
+# Review fixes: profiles that sign in another way, sign-ins that outlive the bridge, tool lists, versions, odd messages
 
 
 @pytest.mark.parametrize("auth_type", ["pat", "oauth-m2m", "azure-cli", ""])
@@ -1217,6 +1220,34 @@ def test_lists_the_bundled_tools_when_genie_answers_tools_list_with_an_error_or_
     bridge.send(TOOLS_LIST)
 
     assert [tool["name"] for tool in bridge.reply(timeout=5)["result"]["tools"]] == GENIE_TOOLS + BRIDGE_TOOLS
+
+
+@pytest.mark.parametrize("asked, used", [("2025-03-26", "2025-03-26"), ("2099-01-01", "2025-06-18")])
+def test_opens_the_genie_session_with_a_known_version_and_sends_it_on_later_requests(start, genie, asked, used):
+    def reply(request):
+        body = request["body"]
+        result = {"protocolVersion": body["params"]["protocolVersion"]} if body.get("method") == "initialize" else {}
+        return 200, JSON, json.dumps({"jsonrpc": "2.0", "id": body.get("id"), "result": result})
+
+    genie.reply = reply
+    bridge = start()
+    bridge.send({**INITIALIZE, "params": {**INITIALIZE["params"], "protocolVersion": asked}})
+    bridge.reply()
+    bridge.send(TOOLS_LIST)
+    bridge.reply()
+
+    assert genie.requests[0]["body"]["params"]["protocolVersion"] == used
+    assert "mcp-protocol-version" not in genie.requests[0]["headers"]
+    assert [request["headers"].get("mcp-protocol-version") for request in genie.requests[1:]] == [used, used]
+
+
+@pytest.mark.parametrize("message", [[INITIALIZE], "initialize", 42, None, {"jsonrpc": "2.0"}])
+def test_answers_a_batch_or_anything_but_a_request_or_notification_with_invalid_request(start, genie, message):
+    bridge = start()
+    bridge.send(message)
+
+    assert bridge.reply(timeout=5) == {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}}
+    assert genie.requests == []
 
 
 # Review fixes: a wall-clock limit on the whole call, not just on each socket step

@@ -28,7 +28,8 @@ UPSTREAM_TIMEOUT_SECONDS = 150  # must end before Antigravity's 3-minute limit o
 CLI_TIMEOUT_SECONDS = 30
 CALL_LIMIT_SECONDS = 160  # all the work for one message, so every call ends well before Antigravity's 3-minute limit
 LOGIN_TIMEOUT_MINUTES = 5  # a sign-in left unfinished in the browser gives up after this
-PROTOCOL_VERSION = "2025-06-18"  # only when Antigravity's initialize doesn't name one
+SUPPORTED_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")  # the MCP versions the bridge speaks, newest first
+PROTOCOL_VERSION = SUPPORTED_VERSIONS[0]
 U2M = "databricks-cli"  # the auth type `databricks auth login` gives a profile: OAuth U2M, the only one Genie here can use
 # Databricks workspace domains on AWS, GCP and Azure, and in the AWS GovCloud and Azure Government clouds.
 WORKSPACE_DOMAINS = ("cloud.databricks.com", "gcp.databricks.com", "azuredatabricks.net", "cloud.databricks.us",
@@ -119,7 +120,8 @@ def workspace_url(text):
         raise problem
     host = parts.hostname or ""
     labels = host.split(".")
-    if (parts.scheme != "https" or "@" in parts.netloc or port not in (None, 443) or labels[0] == "accounts"
+    if (parts.scheme != "https" or "@" in parts.netloc or port not in (None, 443)
+            or labels[0] == "accounts" or labels[0].startswith("accounts-")
             or not any(host.endswith("." + domain) for domain in WORKSPACE_DOMAINS)
             or not all(DNS_LABEL.fullmatch(label) for label in labels)):
         raise problem
@@ -281,6 +283,8 @@ def new_context(env):
         "session_id": None,
         "session_started": False,
         "client_params": None,  # Antigravity's initialize, reused to open the session with Genie One
+        "protocol_version": PROTOCOL_VERSION,  # agreed with Antigravity
+        "upstream_version": None,  # agreed with Genie One, and sent on each request after initialize
         "login": None,  # the background `databricks auth login` this bridge started
         "login_record": None,  # its record, also kept in the temp folder
         "ready": False,
@@ -535,6 +539,8 @@ def forward(message, context):
         session = context["session_id"]
         if session:
             headers["Mcp-Session-Id"] = session
+        if context.get("upstream_version"):
+            headers["MCP-Protocol-Version"] = context["upstream_version"]
         request = urllib.request.Request(context["url"], data=json.dumps(message).encode(), headers=headers, method="POST")
         host = display_host(context["url"])
         timeout = time_left(UPSTREAM_TIMEOUT_SECONDS)
@@ -581,13 +587,18 @@ def start_session(context):
     """Open the session with Genie One the first time a request needs Genie, reusing Antigravity's initialize."""
     if context.get("session_started"):
         return
-    context["session_id"] = None
-    params = context.get("client_params") or {"protocolVersion": PROTOCOL_VERSION, "capabilities": {},
-                                              "clientInfo": {"name": "databricks-genie-bridge", "version": VERSION}}
-    replies = forward({"jsonrpc": "2.0", "id": "databricks-genie-bridge", "method": "initialize", "params": params}, context)
+    context.update(session_id=None, upstream_version=None)
+    version = context.get("protocol_version") or PROTOCOL_VERSION
+    params = dict(context.get("client_params") or {"capabilities": {},
+                                                   "clientInfo": {"name": "databricks-genie-bridge", "version": VERSION}})
+    params["protocolVersion"] = version  # the version agreed with Antigravity, never one the bridge doesn't know
+    initialize_request = {"jsonrpc": "2.0", "id": "databricks-genie-bridge", "method": "initialize", "params": params}
+    replies = forward(initialize_request, context)
     error = next((reply["error"] for reply in replies if isinstance(reply, dict) and reply.get("error")), None)
     if error:
         raise BridgeError("Genie couldn't start a session: {}".format(error.get("message") if isinstance(error, dict) else error))
+    agreed = (matching_result(replies, initialize_request) or {}).get("protocolVersion")
+    context["upstream_version"] = agreed if isinstance(agreed, str) and agreed else version
     forward({"jsonrpc": "2.0", "method": "notifications/initialized"}, context)
     context["session_started"] = True
 
@@ -625,9 +636,11 @@ def tool_result(message, text, error=False):
 
 def initialize(message, context):
     params = message.get("params") if isinstance(message.get("params"), dict) else {}
-    context.update(client_params=params, session_id=None, session_started=False)
+    asked = params.get("protocolVersion")
+    version = asked if asked in SUPPORTED_VERSIONS else PROTOCOL_VERSION  # otherwise the newest the bridge speaks
+    context.update(client_params=params, protocol_version=version, session_id=None, session_started=False)
     return {"jsonrpc": "2.0", "id": message.get("id"), "result": {
-        "protocolVersion": params.get("protocolVersion") or PROTOCOL_VERSION,
+        "protocolVersion": version,
         "capabilities": {"tools": {"listChanged": True}},
         "serverInfo": {"name": "databricks-genie-bridge", "version": VERSION},
         "instructions": INSTRUCTIONS,
@@ -670,7 +683,9 @@ def call_tool(message, context):
 
 def dispatch(message, context):
     """The replies to one message from Antigravity."""
-    method = message.get("method") if isinstance(message, dict) else None
+    if not isinstance(message, dict) or ("method" not in message and "id" not in message):
+        return [{"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}}]  # batches too
+    method = message.get("method")
     if method == "initialize":
         return [initialize(message, context)]
     if method == "ping":
@@ -679,7 +694,7 @@ def dispatch(message, context):
         return list_tools(message, context)
     if method == "tools/call":
         return call_tool(message, context)
-    if not isinstance(message, dict) or method is None or "id" not in message:
+    if method is None or "id" not in message:
         # Notifications get no reply. Genie gets them once its session is open, except notifications/initialized:
         # the bridge sends its own when it opens that session.
         if method != "notifications/initialized" and context["session_started"]:

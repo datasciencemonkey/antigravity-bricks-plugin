@@ -276,6 +276,10 @@ def test_readme_explains_how_to_switch_cli_profiles():
     assert "launchctl unsetenv DATABRICKS_CONFIG_PROFILE" in readme
 
 
+def test_the_skill_quotes_the_line_the_bridge_adds_to_each_genie_ask_result():
+    assert "Asked Genie in <host> (CLI profile <profile>)" in skill_text()
+
+
 def test_the_skill_leaves_a_profile_that_signs_in_another_way_alone():
     step = status_step("unsupported_auth")
 
