@@ -37,6 +37,8 @@ BULLETS_PER_PR = 12
 NOTES_MAX = 60_000
 FOOTER_ROOM = 300  # kept free for the line that says how many pull requests didn't fit
 
+# The sentence every pull request description ends with. It never belongs in the notes, wherever it ends up.
+ATTRIBUTION = re.compile(r"This pull request and its description were written by Isaac\.?", re.IGNORECASE)
 HEADING = re.compile(r" {0,3}(#{1,6})(?:[ \t]+(.*))?")
 FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
 BULLET = re.compile(r"[ \t]*(?:[-*+]|\d{1,9}[.)])(?:[ \t]+(.*))?")
@@ -111,7 +113,8 @@ def summary_bullets(body):
 
     The section starts at a Markdown heading called Summary (any level, any case) and ends at the next heading of the
     same or a higher level. Code fences are skipped whole: no heading or bullet inside one counts. A bullet that wraps
-    onto the following lines is joined into one, and text that isn't a bullet is ignored.
+    onto the following lines is joined into one, and text that isn't a bullet is ignored. The attribution sentence
+    ("This pull request and its description were written by Isaac.") is removed first, so it can't be joined to a bullet.
     """
     if not isinstance(body, str):
         return []
@@ -126,7 +129,7 @@ def summary_bullets(body):
             found.append(current)
         current = None
 
-    for line in body[:MAX_BODY].replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+    for line in ATTRIBUTION.sub("", body[:MAX_BODY]).replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         line = line.rstrip()
         marker = FENCE.fullmatch(line)
         if fence:

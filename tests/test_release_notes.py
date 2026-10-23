@@ -42,7 +42,8 @@ def pr(number, title="A change", body=None, commit=None, merged_at="2026-10-23T1
 
 
 # The pull request description layout from the project's working rules.
-BODY = """## Summary
+ATTRIBUTION = "This pull request and its description were written by Isaac."
+BODY = f"""## Summary
 - The bridge now waits up to 150 s for Genie.
 - It gives up before Antigravity's 3-minute limit.
 
@@ -52,7 +53,7 @@ Closes #28
 ## Testing
 - ran the whole suite
 
-This pull request and its description were written by Isaac.
+{ATTRIBUTION}
 """
 
 
@@ -144,6 +145,22 @@ def test_a_body_that_is_not_text_has_no_bullets(body):
     assert bullets(body) == []
 
 
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        (f"## Summary\n- one\n{ATTRIBUTION}\n", ["one"]),  # straight under the last bullet, where it would be joined to it
+        (f"## Summary\n- one\n\n{ATTRIBUTION}\n", ["one"]),
+        (f"## Summary\n- one. {ATTRIBUTION}\n", ["one."]),  # on the bullet's own line
+        (f"## Summary\n- one\n  {ATTRIBUTION.upper()}\n", ["one"]),  # wrapped under it, in capitals
+        (f"## Summary\n- one\n- {ATTRIBUTION}\n", ["one"]),  # as a bullet of its own
+        (f"## Summary\r\n- one\r\n{ATTRIBUTION}\r\n", ["one"]),
+        (f"## Summary\n- one\n\n## Testing\n- ran it\n\n{ATTRIBUTION}", ["one"]),  # the usual place: the last line
+    ],
+)
+def test_the_attribution_line_never_reaches_the_summary_bullets(body, expected):
+    assert bullets(body) == expected
+
+
 # --- the notes -------------------------------------------------------------------------------------------------
 
 
@@ -161,6 +178,15 @@ def test_each_pull_request_shows_its_title_its_number_and_its_summary_bullets():
         "  - The bridge now waits up to 150 s for Genie.\n"
         "  - It gives up before Antigravity's 3-minute limit.\n"
     )
+
+
+@pytest.mark.parametrize("reference", ["Closes #28", "Part of #28"])
+def test_the_notes_leave_out_the_issues_and_testing_sections_and_the_attribution_line(reference):
+    notes = notes_for(pr(28, "Bridge: wait up to 150 s", BODY.replace("Closes #28", reference)))
+
+    for left_out in ("Isaac", "written by", "Closes", "Part of", "Issues", "Testing", "ran the whole suite"):
+        assert left_out not in notes
+    assert "- Bridge: wait up to 150 s (#28)\n  - The bridge now waits up to 150 s for Genie.\n" in notes
 
 
 def test_a_pull_request_without_a_summary_is_listed_by_its_title_alone():
