@@ -287,6 +287,14 @@ def test_the_skill_quotes_the_line_the_bridge_adds_to_each_genie_ask_result():
     assert "Asked Genie in <host> (Databricks CLI profile <profile>)" in skill_text()
 
 
+def test_the_progress_notes_quote_the_line_the_bridge_adds_to_each_genie_ask_result_and_not_the_one_the_agent_says():
+    # The agent says "Asking Genie in ..." before a question; the bridge ends the result with "Asked Genie in ...".
+    progress = (PLUGIN.parent.parent / "docs" / "progress.md").read_text()
+
+    assert "Asked Genie in <host> (Databricks CLI profile <profile>)" in progress
+    assert "the same line" not in progress
+
+
 def test_the_plugin_docs_say_databricks_cli_profile_so_nobody_reads_it_as_an_agy_setting():
     for document in ("README.md", "rules/AGENTS.md", f"skills/{SKILL}/SKILL.md"):
         assert re.findall(r"(?<!Databricks )CLI profile", (PLUGIN / document).read_text()) == [], document
