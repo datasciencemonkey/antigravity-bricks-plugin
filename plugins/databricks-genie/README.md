@@ -47,9 +47,11 @@ If that profile doesn't exist yet, the agent sets it up the same way on first us
 
 ## Try it
 
-- "Ask Genie which products drove the most revenue, and show the SQL it ran"
-- "Ask Genie to break that down by region"
-- "Turn Genie's SQL into a query file in this project"
+- "Ask Genie which products drove the most revenue last quarter, and show the SQL it ran"
+- "Ask Genie how last quarter's revenue breaks down by region, and show the SQL it ran"
+- "Ask Genie for monthly revenue by product, and save the SQL it ran as a query file in this project"
+
+Each one works on its own in a new chat, so any of them is a good first question.
 
 ## Troubleshooting
 
@@ -61,3 +63,7 @@ If that profile doesn't exist yet, the agent sets it up the same way on first us
 - **HTTP 404:** Genie One isn't available in that workspace. A workspace admin may need to turn on partner-powered AI features.
 - **The Genie tools don't show up:** check that `python3 --version` works in a terminal, then restart Antigravity.
 - **The Databricks CLI isn't found:** the bridge looks on your PATH and in the usual install folders (`/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`).
+
+## License
+
+MIT. The license text is in [LICENSE](LICENSE), and it travels with the plugin.

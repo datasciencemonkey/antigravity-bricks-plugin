@@ -2,11 +2,16 @@
   "name": "databricks-genie",
   "displayName": "Databricks Genie",
   "description": "Ask Databricks Genie about your governed data from Antigravity and turn its answers and SQL into code. Signs in with your Databricks CLI.",
-  "version": "0.3.0",
+  "version": "0.3.1",
+  "author": {
+    "name": "Sathish Gangichetty",
+    "url": "https://github.com/datasciencemonkey"
+  },
+  "license": "MIT",
   "logo": "assets/logo.png",
   "suggestedPrompts": [
-    "Ask Genie which products drove the most revenue, and show the SQL it ran",
-    "Ask Genie to break that down by region",
-    "Turn Genie's SQL into a query file in this project"
+    "Ask Genie which products drove the most revenue last quarter, and show the SQL it ran",
+    "Ask Genie how last quarter's revenue breaks down by region, and show the SQL it ran",
+    "Ask Genie for monthly revenue by product, and save the SQL it ran as a query file in this project"
   ]
 }
