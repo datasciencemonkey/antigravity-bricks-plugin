@@ -1,8 +1,9 @@
-"""The version gate: a change to the plugin must ship under a higher version.
+"""The version gate: a change to the plugin must ship under a version whose last number is higher.
 
-The publishing guide asks that every published update increase `version`. Antigravity doesn't enforce it, so this does:
-if any file under plugins/databricks-genie/ differs from the merge-base with origin/main, plugin.json's version has to be
-higher than it was there.
+The publishing guide asks that every published update increase `version`, and the project's rule is that a change bumps
+only the last number (0.3.0 to 0.3.1 to 0.3.2). Antigravity enforces neither, so this does: if any file under
+plugins/databricks-genie/ differs from the merge-base with origin/main, plugin.json's major and minor have to be the ones
+it had there and its last number has to be higher.
 """
 import json
 import subprocess
@@ -25,11 +26,12 @@ def git(root, *args, check=True):
 
 
 def version_numbers(version):
-    return tuple(int(part) for part in version.split("."))  # numbers, not text: 1.10.0 is higher than 1.9.0
+    return tuple(int(part) for part in version.split("."))  # numbers, not text: 1.0.10 is higher than 1.0.9
 
 
 def unbumped_change(root):
-    """A message if the plugin's files differ from the merge-base with origin/main without a higher version, else None.
+    """A message if the plugin's files differ from the merge-base with origin/main without a bump of only the last
+    number of the version (major and minor unchanged, last number higher), else None.
 
     "Differ" covers the working tree too: committed, edited, deleted and new files. Raises NoBase when there is no
     merge-base to compare with.
@@ -48,12 +50,14 @@ def unbumped_change(root):
         return None  # main has no plugin yet, so any version is a fresh start
     before = json.loads(on_main.stdout)["version"]
     now = json.loads((Path(root) / MANIFEST).read_text())["version"]
-    if version_numbers(now) > version_numbers(before):
+    old, new = version_numbers(before), version_numbers(now)
+    if new[:2] == old[:2] and new[2:] > old[2:]:
         return None
     shown = ", ".join(changed[:5]) + (", ..." if len(changed) > 5 else "")
     return (
-        f"{PLUGIN_DIR} differs from the merge-base with {BASE} ({shown}) but its version is {now}, which isn't higher "
-        f"than {before} there. Bump the last number of the version in {MANIFEST}."
+        f"{PLUGIN_DIR} differs from the merge-base with {BASE} ({shown}), but its version is {now} and it was {before} "
+        f"there. A change to the plugin bumps only the last number of the version in {MANIFEST}: major and minor stay "
+        f"as they were, and the last number goes up."
     )
 
 
@@ -89,9 +93,10 @@ def test_a_changed_plugin_file_with_the_same_version_is_reported_with_the_file_a
     problem = unbumped_change(plugin_repo.path)
 
     assert problem is not None and "scripts/bridge.py" in problem and "1.0.0" in problem
+    assert "only the last number" in problem
 
 
-def test_a_changed_plugin_with_a_higher_version_passes(plugin_repo):
+def test_a_changed_plugin_with_a_higher_last_number_passes(plugin_repo):
     plugin_repo.write(f"{PLUGIN_DIR}/scripts/bridge.py", "print('second')\n")
     set_version(plugin_repo, "1.0.1")
     plugin_repo.commit("Change the bridge and bump the version")
@@ -102,10 +107,32 @@ def test_a_changed_plugin_with_a_higher_version_passes(plugin_repo):
 def test_the_bump_may_come_in_a_later_commit_of_the_same_branch(plugin_repo):
     plugin_repo.write(f"{PLUGIN_DIR}/scripts/bridge.py", "print('second')\n")
     plugin_repo.commit("Change the bridge")
-    set_version(plugin_repo, "1.1.0")
+    set_version(plugin_repo, "1.0.1")
     plugin_repo.commit("Bump the version")
 
     assert unbumped_change(plugin_repo.path) is None
+
+
+def test_a_minor_bump_is_reported_because_only_the_last_number_may_change(plugin_repo):
+    plugin_repo.write(f"{PLUGIN_DIR}/scripts/bridge.py", "print('second')\n")
+    set_version(plugin_repo, "1.1.0")
+    plugin_repo.commit("Change the bridge and bump the minor version")
+
+    problem = unbumped_change(plugin_repo.path)
+
+    assert problem is not None and "1.1.0" in problem and "1.0.0" in problem
+    assert "only the last number" in problem
+
+
+def test_a_major_bump_is_reported_because_only_the_last_number_may_change(plugin_repo):
+    plugin_repo.write(f"{PLUGIN_DIR}/scripts/bridge.py", "print('second')\n")
+    set_version(plugin_repo, "2.0.0")
+    plugin_repo.commit("Change the bridge and bump the major version")
+
+    problem = unbumped_change(plugin_repo.path)
+
+    assert problem is not None and "2.0.0" in problem and "1.0.0" in problem
+    assert "only the last number" in problem
 
 
 def test_a_version_that_is_lower_than_the_one_on_main_is_reported(plugin_repo):
@@ -116,13 +143,24 @@ def test_a_version_that_is_lower_than_the_one_on_main_is_reported(plugin_repo):
     assert unbumped_change(plugin_repo.path) is not None
 
 
-def test_versions_compare_as_numbers_so_1_10_0_is_higher_than_1_9_0(plugin_repo):
-    set_version(plugin_repo, "1.9.0")
-    plugin_repo.commit("Bump to 1.9.0")
+def test_a_lower_last_number_is_reported_even_when_major_and_minor_match(plugin_repo):
+    set_version(plugin_repo, "1.0.5")
+    plugin_repo.commit("Bump to 1.0.5")
     plugin_repo.git("update-ref", "refs/remotes/origin/main", "HEAD")
     plugin_repo.write(f"{PLUGIN_DIR}/scripts/bridge.py", "print('second')\n")
-    set_version(plugin_repo, "1.10.0")
-    plugin_repo.commit("Change the bridge and bump to 1.10.0")
+    set_version(plugin_repo, "1.0.4")
+    plugin_repo.commit("Change the bridge and lower the last number")
+
+    assert unbumped_change(plugin_repo.path) is not None
+
+
+def test_the_last_number_compares_as_a_number_so_1_0_10_is_higher_than_1_0_9(plugin_repo):
+    set_version(plugin_repo, "1.0.9")
+    plugin_repo.commit("Bump to 1.0.9")
+    plugin_repo.git("update-ref", "refs/remotes/origin/main", "HEAD")
+    plugin_repo.write(f"{PLUGIN_DIR}/scripts/bridge.py", "print('second')\n")
+    set_version(plugin_repo, "1.0.10")
+    plugin_repo.commit("Change the bridge and bump to 1.0.10")
 
     assert unbumped_change(plugin_repo.path) is None
 

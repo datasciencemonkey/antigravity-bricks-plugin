@@ -156,6 +156,20 @@ def test_the_versions_rule_bumps_only_the_last_number_and_leaves_tagging_to_the_
         assert fact in rule, fact
 
 
+def test_the_versions_rule_describes_the_test_as_strict_about_major_and_minor():
+    rule = bullet(working_rules(), "- **Versions:**")
+
+    assert "keeps the merge-base's major and minor and has a higher last number" in rule
+    assert "the version isn't higher" not in rule
+
+
+def test_progress_md_describes_the_version_gate_as_a_bump_of_only_the_last_number():
+    gate = bullet(section(PROGRESS, "### The plugin (`plugins/databricks-genie/`)"), "- ~~A version gate")
+
+    assert "keeps the merge-base's major and minor" in gate and "raises the last number" in gate
+    assert "isn't higher" not in gate
+
+
 def test_progress_md_lists_the_mvp_with_each_item_done_or_in_progress():
     mvp = section(PROGRESS, "### The MVP")
 
