@@ -237,10 +237,6 @@ class DatabricksCli:
         self.env = env
         self.profile = env.get("DATABRICKS_CONFIG_PROFILE") or "DEFAULT"
         self.login_hint = "Run: databricks auth login --profile " + self.profile
-        # Let the profile decide the workspace and credentials, not variables inherited from the agent: the CLI gets no
-        # DATABRICKS_* variable but the ones that say which config file and which profile.
-        self.cli_env = {key: value for key, value in env.items()
-                        if not key.startswith("DATABRICKS_") or key in ("DATABRICKS_CONFIG_FILE", "DATABRICKS_CONFIG_PROFILE")}
         self.cached = None  # (token, time to refresh it)
 
     def path(self):
@@ -252,8 +248,9 @@ class DatabricksCli:
     def run(self, args, failure):
         cli = self.path()
         try:
-            # stdin is Antigravity's message stream, so the CLI must never read from it.
-            result = subprocess.run([cli, *args, "--output", "json"], env=self.cli_env, stdin=subprocess.DEVNULL,
+            # stdin is Antigravity's message stream, so the CLI must never read from it. The CLI owns its config and its
+            # environment variables, so it gets the environment unchanged, as a terminal would give it.
+            result = subprocess.run([cli, *args, "--output", "json"], env=self.env, stdin=subprocess.DEVNULL,
                                     capture_output=True, text=True, timeout=time_left(CLI_TIMEOUT_SECONDS))
         except OSError:
             raise CliMissing("The Databricks CLI at {} couldn't be started. Call genie_connection for how to install it.".format(cli))
@@ -334,7 +331,7 @@ class DatabricksCli:
         command = [self.path(), "auth", "login", "--host", url, "--profile", self.profile,
                    "--timeout", "{}m".format(LOGIN_TIMEOUT_MINUTES)]
         try:
-            return subprocess.Popen(command, env=self.cli_env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            return subprocess.Popen(command, env=self.env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL, start_new_session=True)
         except OSError:
             raise CliMissing("The Databricks CLI at {} couldn't be started. Call genie_connection for how to install it.".format(command[0]))

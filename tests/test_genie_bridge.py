@@ -669,7 +669,7 @@ def test_genie_connection_reports_the_host_the_bridge_will_actually_call(start, 
     assert {request["path"] for request in genie.requests} == {path}
 
 
-def test_a_databricks_host_in_the_environment_never_decides_where_the_profiles_token_goes(start, genie, cli):
+def test_a_databricks_host_in_the_environment_never_decides_which_host_the_bridge_calls(start, genie, cli):
     shell_host = FakeGenie()
     try:
         cli.set_profiles({"DEMO": genie.base})
@@ -712,12 +712,13 @@ def test_a_genie_mcp_url_that_is_ignored_is_said_so_on_stderr_without_repeating_
     assert SECRET not in err and "elsewhere" not in err
 
 
-def test_no_databricks_variable_but_the_config_file_and_profile_reaches_the_cli(start, cli):
-    leaks = {"DATABRICKS_HOST": "https://unused.example.test", "DATABRICKS_TOKEN": "made-up", "DATABRICKS_CLIENT_ID": "id",
-             "DATABRICKS_CLIENT_SECRET": "secret", "DATABRICKS_AUTH_TYPE": "pat", "DATABRICKS_ACCOUNT_ID": "account",
-             "DATABRICKS_CLUSTER_ID": "cluster"}
+def test_the_databricks_cli_gets_the_bridges_environment_unchanged(start, cli):
+    # The CLI owns its config and its environment variables, where it keeps its U2M tokens (DATABRICKS_AUTH_STORAGE) among them,
+    # so it gets them as a terminal would give them. DATABRICKS_CLI is how the tests point the bridge at the stand-in.
+    exported = {"DATABRICKS_AUTH_STORAGE": "plaintext", "DATABRICKS_OAUTH_CALLBACK_PORT": "8020", "DATABRICKS_SOMETHING": "else",
+                "DATABRICKS_HOST": "https://unused.example.test", "DATABRICKS_TOKEN": "made-up"}
     cli.set_profiles({})  # so that auth profiles, auth token and auth login all run
-    bridge = start(DATABRICKS_CONFIG_PROFILE="NEW", **leaks)
+    bridge = start(DATABRICKS_CONFIG_PROFILE="NEW", **exported)
     bridge.send(call("genie_connection"))
     bridge.reply()
     bridge.send(call("genie_setup", {"workspace_url": WORKSPACE}, number=4))
@@ -725,7 +726,36 @@ def test_no_databricks_variable_but_the_config_file_and_profile_reaches_the_cli(
     wait_for(lambda: cli.logins())
 
     assert {line.split()[1] for line in cli.calls()} == {"profiles", "token", "login"}
-    assert cli.variables() <= {"DATABRICKS_CONFIG_FILE", "DATABRICKS_CONFIG_PROFILE"}
+    assert cli.variables() == {"DATABRICKS_CLI", "DATABRICKS_CONFIG_FILE", "DATABRICKS_CONFIG_PROFILE", *exported}
+
+
+def test_the_cli_is_started_with_the_environment_itself_for_a_token_and_for_a_sign_in(monkeypatch):
+    bridge = load_bridge()
+    env = {"PATH": "/usr/bin", "DATABRICKS_CLI": "databricks", "DATABRICKS_AUTH_STORAGE": "plaintext",
+           "DATABRICKS_HOST": "https://unused.example.test", "DATABRICKS_TOKEN": "made-up"}
+    seen = []
+
+    def run(command, **options):
+        seen.append(options["env"])
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    def popen(command, **options):
+        seen.append(options["env"])
+
+    monkeypatch.setattr(bridge.subprocess, "run", run)
+    monkeypatch.setattr(bridge.subprocess, "Popen", popen)
+    cli = bridge.DatabricksCli(env)
+    cli.run(["auth", "profiles"], "Couldn't read the profiles.")
+    cli.login("https://unused.example.test")
+
+    assert seen == [env, env]  # not a copy with anything taken out
+
+
+def test_the_bridge_reads_no_databricks_variable_but_the_profile_the_config_file_and_the_path_of_the_cli():
+    # The workspace comes from the CLI's profile listing alone, and the CLI's other variables are the CLI's business.
+    names = set(re.findall(r"DATABRICKS_[A-Z0-9_]+", BRIDGE.read_text()))
+
+    assert names == {"DATABRICKS_CONFIG_PROFILE", "DATABRICKS_CONFIG_FILE", "DATABRICKS_CLI"}
 
 
 def test_genie_connection_lists_the_cli_profiles_when_its_own_is_not_set_up(start, genie, cli):
