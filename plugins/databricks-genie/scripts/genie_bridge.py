@@ -7,6 +7,7 @@ profile is signed in. Tokens come from `databricks auth token` and never leave t
 it runs on the python3 every developer machine already has (3.9 or later).
 """
 import http.client
+import ipaddress
 import json
 import os
 import re
@@ -235,8 +236,10 @@ class DatabricksCli:
         self.env = env
         self.profile = env.get("DATABRICKS_CONFIG_PROFILE") or "DEFAULT"
         self.login_hint = "Run: databricks auth login --profile " + self.profile
-        # Let the profile decide the workspace and credentials, not variables inherited from the agent.
-        self.cli_env = {key: value for key, value in env.items() if key not in ("DATABRICKS_HOST", "DATABRICKS_TOKEN")}
+        # Let the profile decide the workspace and credentials, not variables inherited from the agent: the CLI gets no
+        # DATABRICKS_* variable but the ones that say which config file and which profile.
+        self.cli_env = {key: value for key, value in env.items()
+                        if not key.startswith("DATABRICKS_") or key in ("DATABRICKS_CONFIG_FILE", "DATABRICKS_CONFIG_PROFILE")}
         self.cached = None  # (token, time to refresh it)
 
     def path(self):
@@ -324,11 +327,33 @@ class DatabricksCli:
             raise CliMissing("The Databricks CLI at {} couldn't be started. Call genie_connection for how to install it.".format(command[0]))
 
 
+def loopback_url(text):
+    """text, if it's an http or https URL for this machine, such as a test server, and None for any other URL. The bridge sends the
+    profile's token to the URL it calls, so only the profile's workspace, or this machine, may be where it goes."""
+    try:
+        parts = urllib.parse.urlsplit(text)
+        host = parts.hostname
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https") or not host:
+        return None
+    if host != "localhost":
+        try:
+            if not ipaddress.ip_address(host).is_loopback:
+                return None
+        except ValueError:
+            return None
+    return text
+
+
 def new_context(env):
     """The bridge's state for one Antigravity session. The CLI's config is the only thing that outlives it."""
-    host = env.get("DATABRICKS_HOST")
+    override = loopback_url(env.get("GENIE_MCP_URL") or "")
+    if env.get("GENIE_MCP_URL") and not override:
+        sys.stderr.write("GENIE_MCP_URL is ignored: only a loopback URL, for a test server on this machine, is accepted. "
+                         "Genie is called at the workspace of the Databricks CLI profile.\n")
     return {
-        "override": env.get("GENIE_MCP_URL") or (genie_url(host) if host else None),
+        "override": override,  # a workspace named in the environment never decides: the profile's host does
         "url": None,  # the Genie One URL in use, once the profile is ready
         "cli": DatabricksCli(env),
         "session_id": None,

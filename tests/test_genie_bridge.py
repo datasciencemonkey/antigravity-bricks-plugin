@@ -26,7 +26,8 @@ BRIDGE = Path(__file__).resolve().parent.parent / "plugins" / "databricks-genie"
 # Run the bridge under the oldest Python a developer is likely to have: Apple's /usr/bin/python3 is 3.9.
 PYTHON = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else "python3"
 GENIE_ONE_PATH = "/ai-gateway/mcp-services/system.ai.genie_one_mcp"
-INITIALIZE = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+LOOPBACK = "http://127.0.0.1:9/mcp"  # the only kind of GENIE_MCP_URL the bridge accepts: a test server on this machine
+INITIALIZE ={"jsonrpc": "2.0", "id": 1, "method": "initialize",
               "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}}
 TOOLS_LIST = {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
 INITIALIZED = {"jsonrpc": "2.0", "method": "notifications/initialized"}
@@ -122,11 +123,13 @@ def genie():
 # the file and never listed; keys before the first header belong to DEFAULT; and a missing or unreadable file is an error,
 # while an empty one lists nothing. `auth token` works only for U2M (databricks-cli) profiles. `auth login` rewrites the
 # section it signs in with a host and databricks-cli, which keeps none of its other keys: that is how a client secret is
-# lost. It accepts only the flags the bridge should pass, records each call in $FAKE_CLI_CALLS, and hands out the
-# comma-separated $FAKE_TOKENS in order. FAKE_CLI_FAIL makes `auth token` fail as an expired sign-in does,
-# FAKE_PROFILES_FAIL breaks `auth profiles`, and FAKE_LOGIN_SECONDS and FAKE_LOGIN_FAIL shape `auth login`.
+# lost. It accepts only the flags the bridge should pass, records each call in $FAKE_CLI_CALLS, and the names (never the
+# values) of the DATABRICKS_* variables it was started with in $FAKE_CLI_CALLS.env, and hands out the comma-separated
+# $FAKE_TOKENS in order. FAKE_CLI_FAIL makes `auth token` fail as an expired sign-in does, FAKE_PROFILES_FAIL breaks
+# `auth profiles`, and FAKE_LOGIN_SECONDS and FAKE_LOGIN_FAIL shape `auth login`.
 FAKE_CLI = r"""#!/bin/sh
 echo "$@" >> "$FAKE_CLI_CALLS"
+env | sed -n 's/^\(DATABRICKS_[A-Za-z0-9_]*\)=.*/\1/p' >> "$FAKE_CLI_CALLS.env"
 fail() { echo "Error: $*" >&2; exit 1; }
 config="${DATABRICKS_CONFIG_FILE:-~/.databrickscfg}"
 case "$config" in "~"*) config="$HOME${config#"~"}" ;; esac
@@ -258,6 +261,11 @@ class CliScript:
     def set_config(self, text):
         """Put raw text in the config file."""
         self.config.write_text(text)
+
+    def variables(self):
+        """The names of the DATABRICKS_* variables the CLI was started with, on any call."""
+        names = self.log.with_name(self.log.name + ".env")
+        return set(names.read_text().split()) if names.exists() else set()
 
     def login_records(self):
         return sorted(self.records.glob("databricks-genie-login-*.json"))
@@ -637,16 +645,19 @@ def test_genie_connection_reports_ready_with_the_profile_and_the_host(start, gen
     assert f"Asking Genie in {genie.host} (Databricks CLI profile DEMO)" in report["next_step"]
 
 
-@pytest.mark.parametrize("where", ["GENIE_MCP_URL", "DATABRICKS_HOST", "both", "profile"])
+@pytest.mark.parametrize("where", ["GENIE_MCP_URL", "profile", "DATABRICKS_HOST", "a GENIE_MCP_URL that is not on this machine"])
 def test_genie_connection_reports_the_host_the_bridge_will_actually_call(start, genie, cli, where):
-    env = {"GENIE_MCP_URL": "", "DATABRICKS_HOST": ""}
+    # The profile's host decides, because the token is the profile's. The one exception is a test server on this machine.
+    env = {"GENIE_MCP_URL": ""}
     path = GENIE_ONE_PATH
-    if where in ("GENIE_MCP_URL", "both"):
-        env["GENIE_MCP_URL"], path = genie.url, "/mcp"
-    if where in ("DATABRICKS_HOST", "both"):
-        env["DATABRICKS_HOST"] = genie.base if where == "DATABRICKS_HOST" else "https://unused.example.test"
-    if where == "profile":
+    if where == "GENIE_MCP_URL":
+        env["GENIE_MCP_URL"], path = genie.url, "/mcp"  # the profile stays at the default, a different workspace
+    else:
         cli.set_profiles({"DEMO": genie.base})
+    if where == "DATABRICKS_HOST":
+        env["DATABRICKS_HOST"] = "https://unused.example.test"
+    if where.startswith("a GENIE_MCP_URL"):
+        env["GENIE_MCP_URL"] = "https://elsewhere.example.test/mcp"
     bridge = start(**env)
     _, report = bridge.connection(3)
     bridge.send(call("genie_poll_response", POLL, number=4))
@@ -654,6 +665,65 @@ def test_genie_connection_reports_the_host_the_bridge_will_actually_call(start, 
 
     assert report["host"] == genie.host
     assert {request["path"] for request in genie.requests} == {path}
+
+
+def test_a_databricks_host_in_the_environment_never_decides_where_the_profiles_token_goes(start, genie, cli):
+    shell_host = FakeGenie()
+    try:
+        cli.set_profiles({"DEMO": genie.base})
+        bridge = start(GENIE_MCP_URL="", DATABRICKS_HOST=shell_host.base)
+        bridge.send(call("genie_poll_response", POLL))
+        bridge.reply()
+    finally:
+        shell_host.server.shutdown()
+
+    assert shell_host.requests == []
+    assert {request["headers"]["authorization"] for request in genie.requests} == {"Bearer tok-1"}
+
+
+@pytest.mark.parametrize("url, accepted", [
+    pytest.param("http://127.0.0.1:8080/mcp", True, id="127.0.0.1"),
+    pytest.param("http://localhost:9/mcp", True, id="localhost"),
+    pytest.param("http://[::1]:5000/mcp", True, id="::1"),
+    pytest.param("https://127.0.0.2/mcp", True, id="another 127.x address"),
+    pytest.param("https://elsewhere.example.test/mcp", False, id="another host"),
+    pytest.param("http://127.0.0.1.example.test/mcp", False, id="a name that only starts like 127.0.0.1"),
+    pytest.param("http://localhost.example.test/mcp", False, id="a name that only starts with localhost"),
+    pytest.param("http://127.0.0.1@elsewhere.example.test/mcp", False, id="loopback as the user name"),
+    pytest.param("http://elsewhere.example.test#@127.0.0.1/mcp", False, id="loopback in the fragment"),
+    pytest.param("ftp://127.0.0.1/mcp", False, id="not http or https"),
+    pytest.param("127.0.0.1:8080/mcp", False, id="no scheme"),
+    pytest.param("not a url", False, id="not a URL"),
+    pytest.param("", False, id="empty"),
+])
+def test_only_a_test_server_on_this_machine_is_accepted_as_the_genie_mcp_url(url, accepted):
+    assert load_bridge().new_context({"GENIE_MCP_URL": url})["override"] == (url if accepted else None)
+
+
+def test_a_genie_mcp_url_that_is_ignored_is_said_so_on_stderr_without_repeating_it(capsys):
+    secret_url = "https://user:" + SECRET + "@elsewhere.example.test/mcp"
+
+    assert load_bridge().new_context({"GENIE_MCP_URL": secret_url})["override"] is None
+    err = capsys.readouterr().err
+
+    assert "GENIE_MCP_URL" in err and "loopback" in err
+    assert SECRET not in err and "elsewhere" not in err
+
+
+def test_no_databricks_variable_but_the_config_file_and_profile_reaches_the_cli(start, cli):
+    leaks = {"DATABRICKS_HOST": "https://unused.example.test", "DATABRICKS_TOKEN": "made-up", "DATABRICKS_CLIENT_ID": "id",
+             "DATABRICKS_CLIENT_SECRET": "secret", "DATABRICKS_AUTH_TYPE": "pat", "DATABRICKS_ACCOUNT_ID": "account",
+             "DATABRICKS_CLUSTER_ID": "cluster"}
+    cli.set_profiles({})  # so that auth profiles, auth token and auth login all run
+    bridge = start(DATABRICKS_CONFIG_PROFILE="NEW", **leaks)
+    bridge.send(call("genie_connection"))
+    bridge.reply()
+    bridge.send(call("genie_setup", {"workspace_url": WORKSPACE}, number=4))
+    bridge.reply()
+    wait_for(lambda: cli.logins())
+
+    assert {line.split()[1] for line in cli.calls()} == {"profiles", "token", "login"}
+    assert cli.variables() <= {"DATABRICKS_CONFIG_FILE", "DATABRICKS_CONFIG_PROFILE"}
 
 
 def test_genie_connection_lists_the_cli_profiles_when_its_own_is_not_set_up(start, genie, cli):
@@ -1079,7 +1149,7 @@ def test_unexpected_errors_never_repeat_their_text_which_could_quote_a_token(mon
         raise ValueError("Invalid header value b'Bearer tok-secret'")
 
     monkeypatch.setattr(bridge, "call_upstream", fail)
-    context = bridge.new_context({"GENIE_MCP_URL": "http://example.invalid/x", "DATABRICKS_CONFIG_PROFILE": "TEST"})
+    context = bridge.new_context({"GENIE_MCP_URL": LOOPBACK, "DATABRICKS_CONFIG_PROFILE": "TEST"})
     context["cli"] = FakeCli()
 
     bridge.handle(json.dumps(call("genie_poll_response", POLL)), context)
@@ -1130,7 +1200,7 @@ def test_each_step_of_a_call_gets_only_the_time_left_before_the_call_limit(monke
     have to fit in one call's time limit."""
     bridge = loaded
     timeouts = slow_genie(monkeypatch, bridge, 50)
-    context = bridge.new_context({"GENIE_MCP_URL": "http://example.invalid/x", "DATABRICKS_CONFIG_PROFILE": "TEST"})
+    context = bridge.new_context({"GENIE_MCP_URL": LOOPBACK, "DATABRICKS_CONFIG_PROFILE": "TEST"})
     context["cli"] = FakeCli()
 
     bridge.handle(json.dumps(call("genie_poll_response", POLL)), context)
@@ -1142,7 +1212,7 @@ def test_each_step_of_a_call_gets_only_the_time_left_before_the_call_limit(monke
 def test_a_call_that_runs_out_of_time_says_so_instead_of_running_over(monkeypatch, capsys, loaded):
     bridge = loaded
     timeouts = slow_genie(monkeypatch, bridge, 80)
-    context = bridge.new_context({"GENIE_MCP_URL": "http://example.invalid/x", "DATABRICKS_CONFIG_PROFILE": "TEST"})
+    context = bridge.new_context({"GENIE_MCP_URL": LOOPBACK, "DATABRICKS_CONFIG_PROFILE": "TEST"})
     context["cli"] = FakeCli()
 
     bridge.handle(json.dumps(call("genie_poll_response", POLL)), context)
@@ -1353,7 +1423,7 @@ def test_a_request_stuck_inside_urlopen_cannot_run_past_the_call_limit(monkeypat
         time.sleep(5)
         return FakeResponse()
 
-    context = short_limit(loaded, monkeypatch, {"GENIE_MCP_URL": "http://example.invalid/x"}, 2)
+    context = short_limit(loaded, monkeypatch, {"GENIE_MCP_URL": LOOPBACK}, 2)
     monkeypatch.setattr(loaded.urllib.request, "urlopen", stuck)
     began = time.monotonic()
     loaded.handle(json.dumps(call("genie_poll_response", POLL)), context)
@@ -1388,7 +1458,7 @@ def test_a_token_refresh_after_a_401_gets_only_the_time_left(monkeypatch, capsys
     monkeypatch.setattr(bridge.urllib.request, "urlopen", urlopen)
     for name, value in (("CALL_LIMIT_SECONDS", 160), ("UPSTREAM_TIMEOUT_SECONDS", 150), ("CLI_TIMEOUT_SECONDS", 30)):
         monkeypatch.setattr(bridge, name, value)
-    context = bridge.new_context({"GENIE_MCP_URL": "http://example.invalid/x", "DATABRICKS_CLI": "databricks",
+    context = bridge.new_context({"GENIE_MCP_URL": LOOPBACK, "DATABRICKS_CLI": "databricks",
                                   "DATABRICKS_CONFIG_PROFILE": "TEST"})
 
     bridge.handle(json.dumps(call("genie_poll_response", POLL)), context)
@@ -1644,7 +1714,7 @@ def test_lists_the_bundled_tools_whatever_goes_wrong_and_never_repeats_the_text_
         raise ValueError("Invalid header value b'Bearer tok-secret'")
 
     monkeypatch.setattr(loaded, "call_upstream", fail)
-    context = loaded.new_context({"GENIE_MCP_URL": "http://example.invalid/x", "DATABRICKS_CONFIG_PROFILE": "TEST"})
+    context = loaded.new_context({"GENIE_MCP_URL": LOOPBACK, "DATABRICKS_CONFIG_PROFILE": "TEST"})
     context["cli"] = FakeCli()
 
     loaded.handle(json.dumps(TOOLS_LIST), context)
@@ -1737,7 +1807,7 @@ def never_answers_tool_calls(monkeypatch, bridge, how):
 @pytest.mark.parametrize("how", ["hangs", "socket"])
 def test_a_genie_ask_that_times_out_says_asking_again_starts_a_duplicate_question(monkeypatch, capsys, loaded, how):
     # Genie keeps working on a question after the bridge gives up, and the IDs it would have sent back are lost.
-    context = short_limit(loaded, monkeypatch, {"GENIE_MCP_URL": "http://example.invalid/x"}, 2)
+    context = short_limit(loaded, monkeypatch, {"GENIE_MCP_URL": LOOPBACK}, 2)
     never_answers_tool_calls(monkeypatch, loaded, how)
     loaded.handle(json.dumps(call("genie_ask", {"question": "Revenue last quarter?"})), context)
     reply = json.loads(capsys.readouterr().out)
@@ -1751,7 +1821,7 @@ def test_a_genie_ask_that_times_out_says_asking_again_starts_a_duplicate_questio
 @pytest.mark.parametrize("how", ["hangs", "socket"])
 @pytest.mark.parametrize("name", ["genie_poll_response", "genie_get_query_result"])
 def test_a_call_that_has_ids_and_times_out_gives_them_back_for_polling(monkeypatch, capsys, loaded, how, name):
-    context = short_limit(loaded, monkeypatch, {"GENIE_MCP_URL": "http://example.invalid/x"}, 2)
+    context = short_limit(loaded, monkeypatch, {"GENIE_MCP_URL": LOOPBACK}, 2)
     never_answers_tool_calls(monkeypatch, loaded, how)
     loaded.handle(json.dumps(call(name, {**POLL, "item_id": "i-1"})), context)
     message = text_of(json.loads(capsys.readouterr().out))
@@ -1762,7 +1832,7 @@ def test_a_call_that_has_ids_and_times_out_gives_them_back_for_polling(monkeypat
 
 def test_a_genie_ask_that_was_never_sent_for_lack_of_time_just_says_to_try_again(monkeypatch, capsys, loaded):
     timeouts = slow_genie(monkeypatch, loaded, 80)
-    context = loaded.new_context({"GENIE_MCP_URL": "http://example.invalid/x", "DATABRICKS_CONFIG_PROFILE": "TEST"})
+    context = loaded.new_context({"GENIE_MCP_URL": LOOPBACK, "DATABRICKS_CONFIG_PROFILE": "TEST"})
     context["cli"] = FakeCli()
 
     loaded.handle(json.dumps(call("genie_ask", {"question": "Revenue last quarter?"})), context)
