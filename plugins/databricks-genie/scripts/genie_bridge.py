@@ -563,7 +563,7 @@ def exchange(request, timeout):
     """One HTTP round trip to Genie One: its status, headers and body."""
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return response.status, response.headers, response.read().decode()
+            return response.status, response.headers, response.read().decode(errors="replace")
     except urllib.error.HTTPError as error:
         return error.code, error.headers, error.read().decode(errors="replace")
 
@@ -617,9 +617,12 @@ def forward(message, context):
             raise BridgeError("Genie returned HTTP {}: {}".format(status, text[:200]))
         if not text.strip():
             return []
-        if "text/event-stream" in (response_headers.get("Content-Type") or ""):
-            return parse_event_stream(text)
-        parsed = json.loads(text)
+        try:
+            if "text/event-stream" in (response_headers.get("Content-Type") or ""):
+                return parse_event_stream(text)
+            parsed = json.loads(text)
+        except ValueError:  # an HTML page from a proxy or a single sign-on service, never repeated: it could hold anything
+            raise BridgeError("Genie returned a non-JSON page; check VPN, proxy or sign-in. The request went to {}.".format(host))
         return parsed if isinstance(parsed, list) else [parsed]
 
 
@@ -697,8 +700,8 @@ def list_tools(message, context):
                 result["tools"] = result["tools"] + BRIDGE_TOOLS
                 return replies
             sys.stderr.write("Genie One answered tools/list with an error or nothing, so the bundled list stands in.\n")
-    except BridgeError as error:  # the tools still show up, and calling one says what's wrong
-        sys.stderr.write("Listing Genie One's tools failed, so the bundled list stands in: {}\n".format(error))
+    except Exception as error:  # whatever it was, the tools still show up, and calling one says what's wrong
+        sys.stderr.write("Listing Genie One's tools failed, so the bundled list stands in: {}\n".format(describe(error)))
     context["announce_tools"] = True
     return [{"jsonrpc": "2.0", "id": message.get("id"), "result": {"tools": genie_tools() + BRIDGE_TOOLS}}]
 
@@ -746,6 +749,12 @@ def dispatch(message, context):
     return call_upstream(message, context)
 
 
+def describe(error):
+    """What to say about an error. Only the bridge's own messages are repeated: another error's text could quote a request
+    header, token included."""
+    return str(error) if isinstance(error, BridgeError) else "Genie bridge error ({}).".format(type(error).__name__)
+
+
 def write(message):
     sys.stdout.write(json.dumps(message) + "\n")
     sys.stdout.flush()
@@ -762,8 +771,7 @@ def handle(line, context):
         for reply in dispatch(message, context):
             write(reply)
     except Exception as error:  # every failure becomes an error the agent can read, never a crash
-        # Only the bridge's own messages are repeated: another error's text could quote a request header, token included.
-        text = str(error) if isinstance(error, BridgeError) else "Genie bridge error ({}).".format(type(error).__name__)
+        text = describe(error)
         if isinstance(message, dict) and message.get("id") is not None:
             if message.get("method") == "tools/call":  # in the result, so the agent sees it and can act on it
                 write(tool_result(message, text, error=True))

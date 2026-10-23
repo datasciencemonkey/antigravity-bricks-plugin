@@ -1467,3 +1467,63 @@ def test_lists_only_the_section_names_in_a_config_file(tmp_path):
 
     assert names == ["DEFAULT", "spaced", "note", "dev.eu"]
     assert SECRET not in repr(names)
+
+
+PAGE = "<html><body>Sign in to continue</body></html>"  # what a proxy or a single sign-on page answers with, status 200
+
+
+@pytest.mark.parametrize("method", ["initialize", "tools/list"])
+@pytest.mark.parametrize("content_type, body", [("text/html", PAGE), ("text/event-stream", "data: " + PAGE + "\n\n")])
+def test_still_lists_the_tools_when_genie_answers_with_something_that_is_not_json(start, genie, method, content_type, body):
+    def reply(request):
+        if request["body"].get("method") == method:
+            return 200, {"Content-Type": content_type}, body
+        return 200, JSON, json.dumps({"jsonrpc": "2.0", "id": request["body"].get("id"), "result": {}})
+
+    genie.reply = reply
+    bridge = start()
+    bridge.send(TOOLS_LIST)
+    answer = bridge.reply(timeout=5)
+
+    assert "error" not in answer, answer
+    assert [tool["name"] for tool in answer["result"]["tools"]] == GENIE_TOOLS + BRIDGE_TOOLS
+
+
+def test_a_page_that_is_not_json_becomes_an_error_that_points_at_the_vpn_the_proxy_or_the_sign_in(start, genie):
+    genie.reply = lambda request: (200, {"Content-Type": "text/html"}, PAGE)
+    bridge = start()
+    bridge.send(call("genie_ask", {"question": "Revenue last quarter?"}))
+    reply = bridge.reply()
+
+    assert reply["result"]["isError"] is True
+    assert "Genie returned a non-JSON page; check VPN, proxy or sign-in" in text_of(reply)
+    assert "Sign in to continue" not in text_of(reply)  # the page itself is never repeated
+
+
+def test_a_reply_that_is_not_even_text_is_a_page_that_is_not_json_too(monkeypatch, loaded):
+    class NotText(FakeResponse):
+        def read(self):
+            return b"\xff\xfe\x00 not text"
+
+    monkeypatch.setattr(loaded.urllib.request, "urlopen", lambda request, timeout=None: NotText())
+    context = {"url": "http://example.invalid/x", "cli": FakeCli(), "session_id": None}
+
+    with pytest.raises(loaded.BridgeError, match="non-JSON page"):
+        loaded.forward(INITIALIZE, context)
+
+
+def test_lists_the_bundled_tools_whatever_goes_wrong_and_never_repeats_the_text_of_an_unexpected_error(monkeypatch, capsys, loaded):
+    def fail(message, context):
+        raise ValueError("Invalid header value b'Bearer tok-secret'")
+
+    monkeypatch.setattr(loaded, "call_upstream", fail)
+    context = loaded.new_context({"GENIE_MCP_URL": "http://example.invalid/x", "DATABRICKS_CONFIG_PROFILE": "TEST"})
+    context["cli"] = FakeCli()
+
+    loaded.handle(json.dumps(TOOLS_LIST), context)
+    output = capsys.readouterr()
+    answer = json.loads(output.out)
+
+    assert "error" not in answer, answer
+    assert [tool["name"] for tool in answer["result"]["tools"]] == GENIE_TOOLS + BRIDGE_TOOLS
+    assert "tok-secret" not in output.out + output.err
