@@ -3,7 +3,15 @@ import pytest
 from tools import repo_checks
 
 SUPERSET_HOOKS = ".github/hooks/superset-notify.json"  # the Superset app writes this into every worktree
-REQUIRED = [".omc/", ".isaac/", ".build/", "Antigravity Plugin Marketplace Publishing Guide.pdf", SUPERSET_HOOKS]
+CLAUDE_AGENTS = ".claude/agents/"  # dev-loop subagent definitions: kept on disk, never shipped
+REQUIRED = [
+    ".omc/",
+    ".isaac/",
+    ".build/",
+    "Antigravity Plugin Marketplace Publishing Guide.pdf",
+    SUPERSET_HOOKS,
+    CLAUDE_AGENTS,
+]
 
 
 def test_reports_every_required_entry_missing_from_an_empty_gitignore():
@@ -20,6 +28,14 @@ def test_flags_a_gitignore_that_does_not_ignore_the_superset_hooks_file():
     findings = repo_checks.find_missing_gitignore_entries("\n".join(others) + "\n")
 
     assert [finding.what for finding in findings] == [f"missing entry: {SUPERSET_HOOKS}"]
+
+
+def test_flags_a_gitignore_that_does_not_ignore_the_claude_agents_folder():
+    others = [entry for entry in REQUIRED if entry != CLAUDE_AGENTS]
+
+    findings = repo_checks.find_missing_gitignore_entries("\n".join(others) + "\n")
+
+    assert [finding.what for finding in findings] == [f"missing entry: {CLAUDE_AGENTS}"]
 
 
 COMPLETE = "# local state\n" + "\n".join(REQUIRED) + "\n\n.claude/settings.local.json\n"

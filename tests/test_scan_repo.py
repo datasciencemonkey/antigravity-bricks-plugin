@@ -31,7 +31,7 @@ def test_reports_deny_listed_text_from_files_and_commit_messages(repo, fake_deny
 
 
 def test_reports_required_gitignore_entries_that_are_missing(repo):
-    repo.write(".gitignore", ".omc/\n.isaac/\n.build/\n.github/hooks/superset-notify.json\n")
+    repo.write(".gitignore", ".omc/\n.isaac/\n.build/\n.github/hooks/superset-notify.json\n.claude/agents/\n")
 
     findings = repo_checks.scan_repo(repo.path)
 
@@ -44,7 +44,7 @@ def test_treats_a_missing_gitignore_file_as_missing_every_entry(repo):
 
     findings = repo_checks.scan_repo(repo.path)
 
-    assert [finding.check for finding in findings] == ["gitignore"] * 5
+    assert [finding.check for finding in findings] == ["gitignore"] * 6
 
 
 def test_reports_commits_with_a_wrong_identity(repo):

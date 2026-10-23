@@ -158,6 +158,7 @@ REQUIRED_GITIGNORE_ENTRIES = [
     ".build/",
     "Antigravity Plugin Marketplace Publishing Guide.pdf",
     ".github/hooks/superset-notify.json",  # the Superset app writes this into every worktree
+    ".claude/agents/",  # dev-loop subagent definitions: kept on disk, never shipped
 ]
 
 

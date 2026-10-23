@@ -65,7 +65,8 @@ def repo(tmp_path):
     temp.write("README.md", "# temp repo\n")
     temp.write(
         ".gitignore",
-        ".omc/\n.isaac/\n.build/\nAntigravity Plugin Marketplace Publishing Guide.pdf\n.github/hooks/superset-notify.json\n",
+        ".omc/\n.isaac/\n.build/\nAntigravity Plugin Marketplace Publishing Guide.pdf\n.github/hooks/superset-notify.json\n"
+        ".claude/agents/\n",
     )
     temp.commit("Base commit")
     temp.git("update-ref", "refs/remotes/origin/main", "HEAD")

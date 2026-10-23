@@ -3,8 +3,9 @@
 .isaac/
 .build/
 
-# Local Claude Code settings
+# Local Claude Code settings and dev-loop subagents (on disk, never shipped)
 .claude/settings.local.json
+.claude/agents/
 
 # Reference material kept out of git
 Antigravity Plugin Marketplace Publishing Guide.pdf
