@@ -157,10 +157,25 @@ def test_the_answer_to_whether_a_release_exists_is_not_thrown_away():
     assert 'case "$RELEASE" in' in script and '*"release not found"*' in script
 
 
-def test_creates_the_release_at_the_tested_commit_and_names_it_after_the_tag():
+def test_makes_the_tag_at_the_tested_commit_through_the_api_and_then_releases_that_tag():
     script = release_step(release_workflow())["run"]
+    commands = "\n".join(line for line in script.splitlines() if not line.strip().startswith("#"))  # without the comments
+    make_tag = 'gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$HEAD_SHA"'
 
-    assert re.search(r'gh release create "\$TAG" --target "\$HEAD_SHA" --title "\$TAG"', script)
+    assert make_tag in commands
+    # --target would only choose the commit while the tag doesn't exist; --verify-tag makes gh use the tag made above
+    assert re.search(r'gh release create "\$TAG" --verify-tag --title "\$TAG"', commands) and "--target" not in commands
+    assert commands.index("tools/release_notes.py") < commands.index(make_tag) < commands.index("gh release create")
+
+
+def test_a_release_that_cannot_be_made_takes_back_the_tag_that_this_run_made():
+    script = release_step(release_workflow())["run"]
+    create = script.index("if ! gh release create")
+
+    after = script[create:]
+    assert 'gh api -X DELETE "repos/$GH_REPO/git/refs/tags/$TAG"' in after and after.rstrip().endswith("fi")
+    assert "exit 1" in after
+    assert 'gh api -X DELETE' not in script[:create]  # only after this run made the tag, never before
 
 
 def test_the_notes_are_built_by_release_notes_py_and_reach_gh_only_as_a_file():
@@ -245,8 +260,19 @@ if args[:2] == ["release", "view"]:
         fail(env("FAKE_GH_VIEW_ERROR"))
     if env("FAKE_GH_RELEASE_EXISTS") != "1":
         fail("release not found")  # what the real gh says when there is no such release
+elif args[:2] == ["release", "create"]:
+    if env("FAKE_GH_CREATE_FAILS") == "1":
+        fail("HTTP 422: Validation Failed")
 elif args[:1] == ["api"]:
-    sys.stdout.write(env("FAKE_GH_PULLS", "[]"))
+    endpoint = next(arg for arg in args[1:] if arg.startswith("repos/"))
+    if endpoint.endswith("/git/refs"):  # making a tag
+        if env("FAKE_GH_TAG_EXISTS") == "1":  # someone made it since the checkout
+            fail("gh: Reference already exists (HTTP 422)")
+        print("{}")
+    elif "DELETE" in args:  # taking a tag away
+        print("{}")
+    else:  # listing the pull requests
+        sys.stdout.write(env("FAKE_GH_PULLS", "[]"))
 sys.exit(0)
 """
 
@@ -330,6 +356,13 @@ class Checkout:
     def creates(self):
         return [call for call in self.gh_calls() if call[:2] == ["release", "create"]]
 
+    def tag_refs(self):
+        """The calls that make a tag on GitHub."""
+        return [call for call in self.gh_calls() if call[:1] == ["api"] and call[1].endswith("/git/refs")]
+
+    def tag_deletions(self):
+        return [call for call in self.gh_calls() if call[:1] == ["api"] and "DELETE" in call]
+
     def create_entries(self):
         return [entry for entry in self.entries() if entry["args"][:2] == ["release", "create"]]
 
@@ -344,10 +377,15 @@ def test_a_new_version_gets_a_tag_and_a_release_at_the_tested_commit(checkout_di
 
     assert result.returncode == 0, result.stderr
     assert "::notice" not in result.stdout  # the scripts are there, so nothing is skipped
-    (create,) = checkout_dir.creates()
     version = json.loads((REPO_ROOT / MANIFEST).read_text())["version"]
-    assert create[:6] == ["release", "create", f"v{version}", "--target", checkout_dir.head, "--title"]
-    assert create[6] == f"v{version}"
+    (tag_ref,) = checkout_dir.tag_refs()
+    assert tag_ref == ["api", "repos/owner/repo/git/refs", "-f", f"ref=refs/tags/v{version}", "-f", f"sha={checkout_dir.head}"]
+    (create,) = checkout_dir.creates()
+    assert create[:6] == ["release", "create", f"v{version}", "--verify-tag", "--title", f"v{version}"]
+    assert "--target" not in create
+    assert checkout_dir.tag_deletions() == []
+    calls = checkout_dir.gh_calls()
+    assert calls.index(tag_ref) < calls.index(create)  # the tag exists before the release is made from it
 
 
 @pytest.mark.parametrize("missing", ["tools/release_tag.py", "tools/release_notes.py", "tools"])
@@ -556,7 +594,7 @@ def test_the_release_gets_a_notes_file_of_the_pull_requests_merged_since_the_pre
     assert entry["notes"] == (
         "## Pull requests since v0.3.0\n\n- Bump the version (#2)\n  - Fixes the thing.\n  - Needs no setup.\n"
     )
-    assert [call[0] for call in checkout_dir.gh_calls()] == ["release", "api", "release"]  # view, the pulls, create
+    assert [call[0] for call in checkout_dir.gh_calls()] == ["release", "api", "api", "release"]  # view, pulls, tag, release
 
 
 def test_the_notes_leave_out_pull_requests_from_forks_and_from_outsiders(checkout_dir):
@@ -573,6 +611,26 @@ def test_the_notes_leave_out_pull_requests_from_forks_and_from_outsiders(checkou
     assert result.returncode == 0, result.stderr
     (entry,) = checkout_dir.create_entries()
     assert entry["notes"] == "## Pull requests\n\n- Ours (#2)\n  - Fixes the thing.\n"
+
+
+def test_a_tag_that_appeared_since_the_checkout_stops_the_release_and_is_left_alone(checkout_dir):
+    # Someone made the tag after the checkout, perhaps at another commit. gh release create --target would then have
+    # released wherever that tag points. Making the tag through the API fails instead, and nothing else happens.
+    result = checkout_dir.run(fake={"FAKE_GH_TAG_EXISTS": "1"})
+
+    assert result.returncode != 0 and "Reference already exists" in result.stderr
+    assert len(checkout_dir.tag_refs()) == 1
+    assert checkout_dir.creates() == []
+    assert checkout_dir.tag_deletions() == []  # it is not ours to take away
+
+
+def test_a_release_that_cannot_be_made_does_not_leave_its_tag_behind(checkout_dir):
+    # The next run would see the tag, count the version as released, and never make the release.
+    result = checkout_dir.run(fake={"FAKE_GH_CREATE_FAILS": "1"})
+
+    version = json.loads((REPO_ROOT / MANIFEST).read_text())["version"]
+    assert result.returncode != 0
+    assert checkout_dir.tag_deletions() == [["api", "-X", "DELETE", f"repos/owner/repo/git/refs/tags/v{version}"]]
 
 
 def test_the_first_release_lists_every_merged_pull_request(checkout_dir):

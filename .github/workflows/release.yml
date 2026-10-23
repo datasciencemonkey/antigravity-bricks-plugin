@@ -98,4 +98,13 @@ jobs:
           NOTES="$RUNNER_TEMP/release-notes.md"
           gh api --paginate "repos/{owner}/{repo}/pulls?state=closed&base=main&per_page=100" > "$PULLS"
           python3 tools/release_notes.py --repo "$GH_REPO" --pulls "$PULLS" --head "$HEAD_SHA" --output "$NOTES"
-          gh release create "$TAG" --target "$HEAD_SHA" --title "$TAG" --notes-file "$NOTES" --generate-notes
+          # The tag is made first, at exactly the commit that was tested, and then released. The release command's
+          # --target only chooses the commit while the tag doesn't exist, so a tag that someone made after the checkout
+          # could otherwise decide where the release points. This call fails if the tag exists, and --verify-tag makes
+          # gh use the tag made here instead of making one itself.
+          gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$HEAD_SHA" >/dev/null
+          if ! gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$NOTES" --generate-notes; then
+            # Don't leave a tag without a release: the next run would see the tag and never make the release.
+            gh api -X DELETE "repos/$GH_REPO/git/refs/tags/$TAG" >/dev/null || true
+            exit 1
+          fi
