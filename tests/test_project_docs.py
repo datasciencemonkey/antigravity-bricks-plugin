@@ -103,7 +103,7 @@ def test_agents_md_says_why_the_manifest_ships_author_and_license_but_leaves_out
 
     for fact in ("`author`", "`license`", "`category`", "`tags`", "--strict", "unknown field"):
         assert fact in note, fact
-    for fact in ("follows the app", "`category` or `tags`", "version 0.3.1"):
+    for fact in ("follows the app", "`category` or `tags`", "version 0.3.2"):
         assert fact in review, fact
 
 

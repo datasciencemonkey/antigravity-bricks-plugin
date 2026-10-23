@@ -23,7 +23,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 GENIE_ONE_PATH = "/ai-gateway/mcp-services/system.ai.genie_one_mcp"
 REFRESH_MARGIN_SECONDS = 60
 UPSTREAM_TIMEOUT_SECONDS = 150  # must end before Antigravity's 3-minute limit on each tool call
