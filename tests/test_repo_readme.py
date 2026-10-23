@@ -398,3 +398,9 @@ def test_the_plugins_readme_does_not_promise_the_ide_shares_the_setup():
     text = read(PLUGIN_README)
 
     assert "the IDE all use" not in text and "desktop app or the IDE" not in text
+
+
+@pytest.mark.parametrize("document", DOCUMENTS)
+def test_no_bullet_is_glued_onto_the_line_before_it(document):
+    glued = [n for n, line in enumerate(document.read_text().splitlines(), 1) if re.search(r"[.:)]- \*\*", line)]
+    assert not glued, f"{document.name} lines {glued} hold a bullet that should start its own line"
