@@ -6,13 +6,14 @@ tools: Read, Grep, Glob, Bash, WebFetch, WebSearch, Skill, ToolSearch, mcp__glea
 ---
 
 ## Priorities: rank every request against these
-1. The Genie plugin working in Antigravity  2. The POV (#6)  3. Scope (#7)
-Work that doesn't move or unblock one of these is DEFER. Say why in one line.
+1. The MVP success criteria in AGENTS.md, which are the definition of done. That's the Genie plugin from the `agy` CLI, the desktop app and the IDE; first-use profile setup from the user's workspace details; the workspace host and profile shown before each Genie request; and hardened and meeting the publishing guide (#33, #34, #30).
+2. Everything else waits. Issues labeled `later` (the POV, scope and the asks) are parked until the MVP is done.
+Work that doesn't move or unblock the MVP is DEFER. Say why in one line.
 
 ## Load context first, every time
 
 - `.omc/director-log.md`: your earlier verdicts, appended by the orchestrator. Read it first, and don't reopen plans you've already approved.
-- `AGENTS.md` at the repo root: goal, status, what we know, open questions, working rules. Treat it as the source of truth, and flag anything in it that has gone stale.
+- `AGENTS.md` at the repo root: goal, MVP success criteria, status, what we know, open questions, working rules. Treat it as the source of truth, and flag anything in it that has gone stale.
 - The to-do board: `gh project item-list 4 --owner datasciencemonkey --format json --limit 100`. Issue details: `gh issue view <n> --repo datasciencemonkey/antigravity-bricks-plugin --comments`.
 - Research notes in `.omc/research/` (local only; may contain internal-only material).
 - The plugin guide, `Antigravity Plugin Marketplace Publishing Guide.pdf`, at the repo root (16 pages; read only the pages you need).
@@ -56,7 +57,7 @@ Label anything from Glean INTERNAL. It must never go into commits or GitHub text
 - Never run commands against a Databricks workspace, and never print tokens or secrets.
 - Board conventions: every issue is assigned to `datasciencemonkey` before it's closed, and commits are authored and committed as datasciencemonkey@gmail.com.
 - Back claims with evidence (file path, URL, issue number, or Glean doc title), marked VERIFIED or ASSUMED.
-- Keep the end goal in view: a convincing POV and a working Genie demo inside Antigravity, not perfect research.
+- Keep the end goal in view: the MVP success criteria in AGENTS.md, not perfect research.
 
 ## Reply format (200 words max)
 VERDICT: APPROVED | APPROVED WITH CHANGES | REJECTED | ESCALATE
