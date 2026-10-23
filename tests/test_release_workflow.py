@@ -133,6 +133,14 @@ def test_checks_for_the_tag_and_the_release_before_it_creates_anything():
     assert script[release_exists:create].count("exit 0") == 1  # so does a release that exists
 
 
+def test_the_answer_to_whether_a_release_exists_is_not_thrown_away():
+    script = release_step(release_workflow())["run"]
+    view = next(line for line in script.splitlines() if "gh release view" in line)
+
+    assert "/dev/null" not in view and "2>&1" in view  # the error text is kept, to tell "not found" from a real failure
+    assert 'case "$RELEASE" in' in script and '*"release not found"*' in script
+
+
 def test_creates_the_release_at_the_tested_commit_and_names_it_after_the_tag():
     script = release_step(release_workflow())["run"]
 
@@ -199,17 +207,29 @@ def test_a_commit_without_the_release_scripts_is_skipped_with_a_notice_before_an
 
 FAKE_GH = """#!/usr/bin/env python3
 import json, os, sys
+
 args = sys.argv[1:]
+env = os.environ.get
 notes = None
 if "--notes-file" in args:  # the real gh reads the file when it is called, so the stand-in does too
     with open(args[args.index("--notes-file") + 1]) as handle:
         notes = handle.read()
-with open(os.environ["FAKE_GH_LOG"], "a") as log:
+with open(env("FAKE_GH_LOG"), "a") as log:
     log.write(json.dumps({"args": args, "notes": notes}) + "\\n")
+
+
+def fail(message):
+    sys.stderr.write(message + "\\n")
+    sys.exit(1)
+
+
 if args[:2] == ["release", "view"]:
-    sys.exit(0 if os.environ.get("FAKE_GH_RELEASE_EXISTS") == "1" else 1)
-if args[:1] == ["api"]:
-    sys.stdout.write(os.environ.get("FAKE_GH_PULLS", "[]"))
+    if env("FAKE_GH_VIEW_ERROR"):  # the API is down, or the token can't read releases
+        fail(env("FAKE_GH_VIEW_ERROR"))
+    if env("FAKE_GH_RELEASE_EXISTS") != "1":
+        fail("release not found")  # what the real gh says when there is no such release
+elif args[:1] == ["api"]:
+    sys.stdout.write(env("FAKE_GH_PULLS", "[]"))
 sys.exit(0)
 """
 
@@ -261,15 +281,18 @@ class Checkout:
     def check_out(self, sha):
         self.repo.git("checkout", "-q", "--detach", sha)
 
-    def run(self, head_sha=None, release_exists=False, pulls="[]"):
-        """Run the step. pulls is what the stand-in gh prints for `gh api`: JSON text, or a list to turn into it."""
+    def run(self, head_sha=None, release_exists=False, pulls="[]", fake=None):
+        """Run the step. pulls is what the stand-in gh prints for `gh api`: JSON text, or a list to turn into it.
+
+        fake is a dict of extra FAKE_GH_* variables that make the stand-in fail the way the real gh can.
+        """
         env = {
             **os.environ, **ISOLATED_GIT,
             "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
             "FAKE_GH_LOG": str(self.log), "FAKE_GH_RELEASE_EXISTS": "1" if release_exists else "0",
             "FAKE_GH_PULLS": pulls if isinstance(pulls, str) else json.dumps(pulls),
             "GH_TOKEN": "not-a-real-token", "GH_REPO": "owner/repo", "HEAD_SHA": self.head if head_sha is None else head_sha,
-            "RUNNER_TEMP": str(self.runner_temp),
+            "RUNNER_TEMP": str(self.runner_temp), **(fake or {}),
         }
         # GitHub runs `run:` steps as `bash --noprofile --norc -eo pipefail {0}`.
         return subprocess.run(
@@ -346,6 +369,29 @@ def test_a_version_whose_tag_exists_is_left_alone(checkout_dir):
 
     assert result.returncode == 0, result.stderr
     assert checkout_dir.creates() == []
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "HTTP 502: Bad Gateway (https://api.example.invalid/repos/owner/repo/releases/tags/v0.3.0)",
+        "HTTP 403: Resource not accessible by integration",
+        "error connecting to the API server",
+    ],
+)
+def test_a_failure_to_find_out_whether_the_release_exists_stops_the_release(message, checkout_dir):
+    result = checkout_dir.run(fake={"FAKE_GH_VIEW_ERROR": message})
+
+    assert result.returncode != 0
+    assert [call[:2] for call in checkout_dir.gh_calls()] == [["release", "view"]]  # nothing after the failed question
+    assert "::error::" in result.stdout and message in result.stderr  # and the log says why
+
+
+def test_a_release_that_gh_reports_as_not_found_lets_the_release_go_ahead(checkout_dir):
+    result = checkout_dir.run()  # the stand-in says "release not found", as the real gh does
+
+    assert result.returncode == 0, result.stderr
+    assert len(checkout_dir.creates()) == 1
 
 
 def test_a_version_that_already_has_a_release_is_left_alone(checkout_dir):

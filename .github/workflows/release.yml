@@ -64,10 +64,20 @@ jobs:
             echo "$TAG already exists; nothing to release."
             exit 0
           fi
-          if gh release view "$TAG" >/dev/null 2>&1; then
+          # gh says "release not found" when there is no such release. Any other failure (the API is down, the token
+          # can't read releases) answers nothing, so it stops the step instead of counting as "no release yet".
+          if RELEASE="$(gh release view "$TAG" 2>&1)"; then
             echo "A release for $TAG already exists; nothing to release."
             exit 0
           fi
+          case "$RELEASE" in
+            *"release not found"*) ;;
+            *)
+              echo "::error::gh release view failed, so the step can't tell whether $TAG has a release."
+              echo "$RELEASE" >&2
+              exit 1
+              ;;
+          esac
           # Pull request titles and bodies are untrusted text. tools/release_notes.py turns the pull requests merged
           # since the previous release into a notes file, and that file is the only way their text reaches gh.
           PULLS="$RUNNER_TEMP/pulls.json"
