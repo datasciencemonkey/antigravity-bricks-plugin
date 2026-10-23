@@ -10,6 +10,7 @@ import os
 import queue
 import re
 import signal
+import stat
 import subprocess
 import threading
 import time
@@ -207,7 +208,10 @@ class CliScript:
         self.log = folder / "cli-calls"
         self.store = folder / "cli-profiles"
         self.config = folder / "databrickscfg"  # the CLI's config file; the bridge reads its section names
-        self.tmp = folder / "tmp"  # the bridge's temp folder, where it records a sign-in in progress
+        self.home = folder / "home"  # the bridge's home folder
+        self.records = self.home / ".cache" / "antigravity-databricks-genie"  # where it records a sign-in in progress
+        self.tmp = folder / "tmp"  # the bridge's temp folder, which must stay empty
+        self.home.mkdir()
         self.tmp.mkdir()
         self.set_profiles({"DEMO": WORKSPACE, "DEFAULT": WORKSPACE})
 
@@ -225,7 +229,7 @@ class CliScript:
         self.config.write_text(text)
 
     def login_records(self):
-        return sorted(self.tmp.glob("databricks-genie-login-*.json"))
+        return sorted(self.records.glob("databricks-genie-login-*.json"))
 
     def calls(self):
         return self.log.read_text().splitlines() if self.log.exists() else []
@@ -235,7 +239,7 @@ class CliScript:
 
     def env(self):
         return {"DATABRICKS_CLI": str(self.path), "FAKE_CLI_CALLS": str(self.log), "FAKE_PROFILES": str(self.store),
-                "DATABRICKS_CONFIG_FILE": str(self.config), "TMPDIR": str(self.tmp)}
+                "DATABRICKS_CONFIG_FILE": str(self.config), "HOME": str(self.home), "TMPDIR": str(self.tmp)}
 
 
 @pytest.fixture
@@ -988,9 +992,9 @@ def load_bridge():
 
 @pytest.fixture
 def loaded(monkeypatch, tmp_path):
-    """The bridge loaded in this process, keeping any sign-in record in tmp_path instead of the real temp folder."""
+    """The bridge loaded in this process, with tmp_path as its home folder, so nothing is read from or written to the real one."""
     bridge = load_bridge()
-    monkeypatch.setattr(bridge.tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
     return bridge
 
 
@@ -1406,13 +1410,11 @@ def test_genie_connection_reports_a_profile_the_cli_does_not_list_but_the_config
 
 
 @pytest.mark.parametrize("variable, name", [("", ".databrickscfg"), ("~/custom.cfg", "custom.cfg")])
-def test_looks_for_the_config_file_where_the_cli_does(start, cli, tmp_path, variable, name):
+def test_looks_for_the_config_file_where_the_cli_does(start, cli, variable, name):
     # $DATABRICKS_CONFIG_FILE, with a leading ~ expanded to the home folder, else ~/.databrickscfg
-    home = tmp_path / "home"
-    home.mkdir()
-    (home / name).write_text(azure_service_principal("NEW"))
+    (cli.home / name).write_text(azure_service_principal("NEW"))
     cli.set_profiles({})
-    bridge = start(DATABRICKS_CONFIG_PROFILE="NEW", DATABRICKS_CONFIG_FILE=variable, HOME=str(home))
+    bridge = start(DATABRICKS_CONFIG_PROFILE="NEW", DATABRICKS_CONFIG_FILE=variable)
     _, report = bridge.connection(3)
 
     assert report["status"] == "profile_exists_unreadable"
@@ -1527,3 +1529,69 @@ def test_lists_the_bundled_tools_whatever_goes_wrong_and_never_repeats_the_text_
     assert "error" not in answer, answer
     assert [tool["name"] for tool in answer["result"]["tools"]] == GENIE_TOOLS + BRIDGE_TOOLS
     assert "tok-secret" not in output.out + output.err
+
+
+def mode_of(path):
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+def start_sign_in(bridge, number=3):
+    bridge.send(call("genie_setup", {"workspace_url": WORKSPACE}, number=number))
+    return report_of(bridge.reply())
+
+
+def test_the_sign_in_record_is_kept_in_a_private_folder_in_the_home_folder_not_in_the_shared_temp_folder(start, cli):
+    cli.set_profiles({})
+    bridge = start(DATABRICKS_CONFIG_PROFILE="NEW", FAKE_LOGIN_SECONDS="1")
+    start_sign_in(bridge)
+
+    assert list(cli.tmp.iterdir()) == []  # /tmp is shared, so anyone could plant or read a file there
+    (record,) = cli.login_records()
+    assert record.parent == cli.home / ".cache" / "antigravity-databricks-genie"
+    assert mode_of(record.parent) == 0o700 and record.parent.stat().st_uid == os.getuid()
+    assert mode_of(record) == 0o600
+    wait_for_sign_in_to_end(bridge)
+
+
+def test_a_record_folder_that_is_open_to_others_is_made_private(start, cli):
+    cli.records.mkdir(parents=True)
+    cli.records.chmod(0o755)
+    cli.set_profiles({})
+    bridge = start(DATABRICKS_CONFIG_PROFILE="NEW", FAKE_LOGIN_SECONDS="1")
+    start_sign_in(bridge)
+
+    assert mode_of(cli.records) == 0o700
+    assert len(cli.login_records()) == 1
+    wait_for_sign_in_to_end(bridge)
+
+
+def test_a_record_folder_that_is_a_link_is_never_written_through(start, cli, tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    cli.records.parent.mkdir(parents=True)
+    cli.records.symlink_to(elsewhere, target_is_directory=True)
+    cli.set_profiles({})
+    bridge = start(DATABRICKS_CONFIG_PROFILE="NEW", FAKE_LOGIN_SECONDS="1")
+    started = start_sign_in(bridge)
+    _, report = wait_for_sign_in_to_end(bridge)
+
+    assert started["status"] == "login_in_progress" and report["status"] == "ready"  # this bridge still tracks it
+    assert list(elsewhere.iterdir()) == [] and list(cli.tmp.iterdir()) == []
+
+
+def test_a_record_folder_owned_by_someone_else_is_not_used(monkeypatch, loaded):
+    assert loaded.login_folder(create=True) is not None
+    someone_else = os.getuid() + 1
+
+    with monkeypatch.context() as patch:
+        patch.setattr(loaded.os, "getuid", lambda: someone_else)
+
+        assert loaded.login_folder() is None
+        assert loaded.login_folder(create=True) is None
+
+
+def test_checking_the_connection_creates_no_folder(start, cli):
+    bridge = start()
+    bridge.connection(3)
+
+    assert not cli.records.parent.exists()

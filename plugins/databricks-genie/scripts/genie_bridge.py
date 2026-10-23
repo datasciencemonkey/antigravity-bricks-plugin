@@ -11,6 +11,7 @@ import json
 import os
 import re
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -315,18 +316,37 @@ def new_context(env):
         "protocol_version": PROTOCOL_VERSION,  # agreed with Antigravity
         "upstream_version": None,  # agreed with Genie One, and sent on each request after initialize
         "login": None,  # the background `databricks auth login` this bridge started
-        "login_record": None,  # its record, also kept in the temp folder
+        "login_record": None,  # its record, also kept in a private folder in the home folder
         "ready": False,
         "announce_tools": False,  # tell Antigravity its tool list changed once Genie One's own list can be fetched
     }
 
 
-def login_file(profile):
-    """Where a background sign-in for profile is recorded: the OS temp folder, one file per user and profile."""
-    if not PROFILE_NAME.fullmatch(profile):
+def login_folder(create=False):
+    """The folder for sign-in records, ~/.cache/antigravity-databricks-genie, which only this user can use. With create, it is
+    made when it's missing. None when there is no such folder or it can't be trusted: a link (it could point anywhere) or
+    another user's folder. One that is open to others is made private."""
+    path = os.path.join(os.path.expanduser("~"), ".cache", "antigravity-databricks-genie")
+    try:
+        if create:
+            os.makedirs(path, mode=0o700, exist_ok=True)
+        info = os.lstat(path)
+        if not stat.S_ISDIR(info.st_mode):
+            return None
+        if hasattr(os, "getuid"):
+            if info.st_uid != os.getuid():
+                return None
+            if info.st_mode & 0o077:
+                os.chmod(path, 0o700)
+    except OSError:
         return None
-    owner = os.getuid() if hasattr(os, "getuid") else "user"
-    return os.path.join(tempfile.gettempdir(), "databricks-genie-login-{}-{}.json".format(owner, profile))
+    return path
+
+
+def login_file(profile, create=False):
+    """Where a background sign-in for profile is recorded: one file per profile, in the private folder."""
+    folder = login_folder(create) if PROFILE_NAME.fullmatch(profile) else None
+    return os.path.join(folder, "databricks-genie-login-{}.json".format(profile)) if folder else None
 
 
 def read_login_file(profile):
@@ -347,7 +367,7 @@ def read_login_file(profile):
 
 def write_login_file(record):
     """Save the sign-in's process id, profile, workspace and start time. There's never a token in it."""
-    path = login_file(record["profile"])
+    path = login_file(record["profile"], create=True)
     if not path:
         return
     try:
