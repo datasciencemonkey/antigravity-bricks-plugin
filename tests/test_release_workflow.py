@@ -76,6 +76,11 @@ def test_the_token_can_write_contents_and_nothing_else():
     assert "permissions" not in job(workflow)  # a job-level block would replace the workflow-level one
 
 
+def test_only_one_release_job_runs_at_a_time_and_a_running_one_is_never_cancelled():
+    # Two pushes in quick succession would otherwise both look for a tag, find none, and both try to make it.
+    assert release_workflow()["concurrency"] == {"group": "release", "cancel-in-progress": False}
+
+
 def test_every_action_is_pinned_to_a_full_commit_sha():
     used = [step["uses"] for step in steps(release_workflow()) if "uses" in step]
 

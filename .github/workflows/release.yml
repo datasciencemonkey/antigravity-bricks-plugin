@@ -14,6 +14,12 @@ on:
 permissions:
   contents: write # gh release create makes the tag and the release; nothing else is granted
 
+# One release job at a time. A run that arrives while another is going waits for it and the running one is never
+# cancelled (GitHub lets only one run wait, so a newer waiting run replaces an older waiting one).
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release:
     # A failed run, or a run for anything but a push, releases nothing.
