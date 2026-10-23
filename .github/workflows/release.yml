@@ -43,6 +43,22 @@ jobs:
               exit 0
             fi
           done
+          # The commit comes from the event and goes onto git's command line below, so it must be a full SHA.
+          if ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::The commit to release is not a full commit SHA."
+            exit 1
+          fi
+          # Only a commit on main is released. The tests also run for a pushed tag, and then the event's branch is the
+          # tag's name, which can be "main" while the tag points at any commit. (Exit status 1 means "not an ancestor";
+          # anything else, such as a checkout without origin/main, is an error and stops the step.)
+          status=0
+          git merge-base --is-ancestor "$HEAD_SHA" origin/main || status=$?
+          if [ "$status" -eq 1 ]; then
+            echo "::notice title=Nothing to release::This commit is not on main."
+            exit 0
+          elif [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi
           TAG="$(python3 tools/release_tag.py)"
           if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
             echo "$TAG already exists; nothing to release."

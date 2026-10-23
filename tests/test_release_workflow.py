@@ -158,6 +158,35 @@ def test_never_edits_the_manifest_or_pushes_or_commits():
             assert not re.search(forbidden, script), forbidden
 
 
+def test_only_a_commit_that_is_on_main_is_released_and_that_is_checked_before_anything_is_read_or_asked():
+    script = release_step(release_workflow())["run"]
+
+    ancestor = script.index('git merge-base --is-ancestor "$HEAD_SHA" origin/main')
+    for later in ("python3 tools/release_tag.py", "git rev-parse", "gh release view", "gh api", "gh release create"):
+        assert ancestor < script.index(later), later
+    after = script[ancestor:script.index("python3 tools/release_tag.py")]
+    assert "-eq 1" in after and "exit 0" in after  # not an ancestor: skip
+    assert "exit \"$status\"" in after  # any other failure (no origin/main, a bad object) stops the step
+
+
+def test_the_commit_from_the_event_is_checked_to_be_a_full_sha_before_git_gets_it():
+    script = release_step(release_workflow())["run"]
+
+    check = script.index('[[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]')
+    assert check < script.index("git merge-base") and "exit 1" in script[check:script.index("git merge-base")]
+
+
+def test_no_notice_or_error_line_repeats_event_data():
+    # Workflow commands are read from the log, so text from the event must not be echoed into one.
+    for line in release_step(release_workflow())["run"].splitlines():
+        if "::notice" in line or "::error" in line:
+            assert "HEAD_SHA" not in line and "GH_" not in line, line
+
+
+def test_the_checkout_fetches_every_branch_so_origin_main_is_there_to_compare_with():
+    assert checkout(release_workflow())["with"]["fetch-depth"] == 0  # all history of all branches and tags
+
+
 def test_a_commit_without_the_release_scripts_is_skipped_with_a_notice_before_anything_else_runs():
     script = release_step(release_workflow())["run"]
 
@@ -220,6 +249,17 @@ class Checkout:
     def set_version(self, version):
         self.repo.write(MANIFEST, json.dumps({"name": "databricks-genie", "version": version}, indent=2) + "\n")
         self.head = self.repo.commit(f"Version {version}")
+        self.repo.git("update-ref", "refs/remotes/origin/main", self.head)  # fetch-depth 0 fetches every branch
+
+    def commit_off_main(self, message="A commit that is not on main"):
+        """A commit on a side branch, which is what a pushed tag can point at. The checkout goes back to main."""
+        self.repo.git("checkout", "-q", "-b", "side")
+        sha = self.repo.commit(message)
+        self.repo.git("checkout", "-q", "main")
+        return sha
+
+    def check_out(self, sha):
+        self.repo.git("checkout", "-q", "--detach", sha)
 
     def run(self, head_sha=None, release_exists=False, pulls="[]"):
         """Run the step. pulls is what the stand-in gh prints for `gh api`: JSON text, or a list to turn into it."""
@@ -228,7 +268,7 @@ class Checkout:
             "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
             "FAKE_GH_LOG": str(self.log), "FAKE_GH_RELEASE_EXISTS": "1" if release_exists else "0",
             "FAKE_GH_PULLS": pulls if isinstance(pulls, str) else json.dumps(pulls),
-            "GH_TOKEN": "not-a-real-token", "GH_REPO": "owner/repo", "HEAD_SHA": head_sha or self.head,
+            "GH_TOKEN": "not-a-real-token", "GH_REPO": "owner/repo", "HEAD_SHA": self.head if head_sha is None else head_sha,
             "RUNNER_TEMP": str(self.runner_temp),
         }
         # GitHub runs `run:` steps as `bash --noprofile --norc -eo pipefail {0}`.
@@ -335,14 +375,50 @@ def test_a_version_that_is_not_three_numbers_fails_the_step_and_creates_nothing(
     assert not checkout_dir.ran_the_canary()
 
 
-def test_a_head_sha_that_is_not_a_full_sha_stops_the_release_and_runs_nothing(checkout_dir):
-    hostile = "abc; touch canary && echo $(id)"
-
-    result = checkout_dir.run(head_sha=hostile)
+@pytest.mark.parametrize(
+    "head_sha",
+    ["abc; touch canary && echo $(id)", "--all", "HEAD", "main", "abc", "", "A" * 40, "g" * 40, "0" * 39, "0" * 41, "0" * 40 + "\n"],
+)
+def test_a_head_sha_that_is_not_a_full_lowercase_sha_stops_the_release_before_anything_runs(head_sha, checkout_dir):
+    result = checkout_dir.run(head_sha=head_sha)
 
     assert result.returncode != 0
-    assert checkout_dir.creates() == []
+    assert checkout_dir.gh_calls() == []
+    assert "::error::" in result.stdout
     assert not checkout_dir.ran_the_canary()
+
+
+def test_a_commit_that_is_not_on_main_is_skipped_with_a_notice(checkout_dir):
+    # The tests also run for a pushed tag, and the event's branch is then the tag's name, which can be "main".
+    side = checkout_dir.commit_off_main()
+
+    result = checkout_dir.run(head_sha=side)
+
+    assert result.returncode == 0, result.stderr
+    assert checkout_dir.gh_calls() == []
+    (notice,) = [line for line in result.stdout.splitlines() if line.startswith("::notice")]
+    assert "main" in notice and side not in notice
+
+
+def test_a_commit_that_main_has_moved_past_is_still_released(checkout_dir):
+    older = checkout_dir.head
+    checkout_dir.set_version("0.3.1")  # main moves on while the tests ran
+    checkout_dir.check_out(older)  # the workflow checks out the tested commit
+
+    result = checkout_dir.run(head_sha=older)
+
+    assert result.returncode == 0, result.stderr
+    version = json.loads((REPO_ROOT / MANIFEST).read_text())["version"]
+    assert [create[2] for create in checkout_dir.creates()] == [f"v{version}"]
+
+
+def test_a_checkout_without_origin_main_stops_the_release_instead_of_guessing(checkout_dir):
+    checkout_dir.repo.git("update-ref", "-d", "refs/remotes/origin/main")
+
+    result = checkout_dir.run()
+
+    assert result.returncode != 0
+    assert checkout_dir.gh_calls() == []
 
 
 def test_the_release_gets_a_notes_file_of_the_pull_requests_merged_since_the_previous_tag(checkout_dir):
