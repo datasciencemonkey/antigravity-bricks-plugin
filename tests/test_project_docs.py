@@ -238,13 +238,35 @@ def test_the_first_use_decision_records_what_the_bridge_does_with_the_config_fil
     assert "checks the section names" not in decision  # it reads key names now
 
 
-def test_the_first_use_decision_says_the_profiles_host_decides_where_its_token_goes():
+def test_the_first_use_decision_says_the_workspace_comes_only_from_the_profile():
     decision = bullet(decisions(), "- First-use setup")
 
-    for fact in ("The workspace comes only from the profile, because the token is the profile's",
-                 "an inherited `DATABRICKS_HOST` doesn't steer it",
-                 "no `DATABRICKS_*` variable except `DATABRICKS_CONFIG_FILE` and `DATABRICKS_CONFIG_PROFILE`",
+    for fact in ("The workspace comes only from the profile: the bridge reads no workspace from the environment",
+                 "an inherited `DATABRICKS_HOST` doesn't steer where it calls",
                  "`GENIE_MCP_URL`", "only for a loopback URL"):
+        assert fact in decision, fact
+    assert "the CLI calls get no `DATABRICKS_*` variable" not in decision  # the CLI's environment is left alone
+
+
+def test_the_first_use_decision_says_the_bridge_asks_the_cli_for_its_profiles_before_it_trusts_its_own_guess_at_the_config():
+    decision = bullet(decisions(), "- First-use setup")
+
+    for fact in ("The bridge asks the CLI first and takes its failure for no profiles only when the config file is missing "
+                 "where the bridge looks too", "on Windows it uses USERPROFILE, not HOME"):
+        assert fact in decision, fact
+
+
+def test_the_cli_owns_its_environment_decision_is_recorded_with_its_price_and_its_history():
+    decision = bullet(decisions(), "- The CLI owns its environment")
+
+    for fact in ("(the user, 2026-10-23)", "the bridge leaves the CLI's environment alone",
+                 "the CLI owns its config and environment variables", "get the bridge's environment unchanged, as in the "
+                 "user's terminal", "`DATABRICKS_AUTH_STORAGE`", "`DATABRICKS_OAUTH_CALLBACK_PORT`",
+                 "reads only `DATABRICKS_CONFIG_PROFILE`", "`DATABRICKS_CONFIG_FILE`", "`DATABRICKS_CLI`",
+                 "it never reads `DATABRICKS_HOST`", "comes only from the CLI's profile listing",
+                 "an exported `DATABRICKS_HOST` or `DATABRICKS_TOKEN` for another workspace can make the CLI report a sign-in "
+                 "error", "unset them", "`GENIE_MCP_URL`", "only for a loopback URL",
+                 "An earlier version filtered the CLI's environment", "looked like `login_needed`"):
         assert fact in decision, fact
 
 
@@ -260,14 +282,20 @@ def test_the_standalone_connector_decision_says_what_each_kind_of_timeout_tells_
 def test_what_we_know_records_how_the_real_databricks_cli_behaves():
     known = what_we_know()
     exits = bullet(known, "- `databricks auth profiles --skip-validate` exits 1")
+    storage = bullet(known, "- `DATABRICKS_AUTH_STORAGE`")
     lists = bullet(known, "- It lists only config sections that have a host or an account_id")
     parser = bullet(known, "- The INI parser (go-ini)")
     configure = bullet(known, "- `databricks configure --host <host> --profile <name>`")
     stand_in = bullet(known, "- The tests keep a stand-in")
 
     assert "**The Databricks CLI (v1.22.1, checked against the real CLI in #33)**" in known
-    for fact in ("config file is missing", "a new machine has none", "a folder", '`{"profiles": null}` for an empty file'):
+    for fact in ("config file is missing", "a new machine has none", "a folder", '`{"profiles": null}` for an empty file',
+                 "On Windows the CLI looks under USERPROFILE for its config, wherever HOME points"):
         assert fact in exits, fact
+    for fact in ("`plaintext` or `secure`", "the file cache or the OS keyring", "overrides `[__settings__] auth_storage`",
+                 "tell users to set it", "`DATABRICKS_OAUTH_CALLBACK_PORT`", "`DATABRICKS_DISABLE_OAUTH_REFRESH_TOKEN`",
+                 "which is why the bridge leaves its environment alone"):
+        assert fact in storage, fact
     for fact in ("`account_id`", "`azure_workspace_resource_id`", "an empty header"):
         assert fact in lists, fact
     for fact in ("keys before the first header into DEFAULT", "merges them with a later `[DEFAULT]` header",
@@ -295,10 +323,14 @@ def test_progress_md_lists_the_review_fixes_for_the_hidden_profile_the_missing_c
     for fact in ("reading only key names, never values", "at least one key", "An empty header", "`[DEFAULT]`",
                  "keys before the first header count as DEFAULT's",
                  "A machine with no config file is `not_configured` and can set up",
-                 "The profile's host decides where its token goes", "`GENIE_MCP_URL`", "only for a loopback URL",
+                 "The profile's host decides where the bridge calls", "`GENIE_MCP_URL`", "only for a loopback URL",
+                 "Databricks CLI gets the bridge's environment unchanged", "`DATABRICKS_AUTH_STORAGE`",
+                 "a headless sign-in made with plaintext storage looked like `login_needed`",
+                 "The bridge asks the CLI for its profiles first", "can't hide a listed profile",
                  "cancel its running question first", "the request wasn't sent"):
         assert fact in fixes, fact
     assert "reading only section names" not in fixes
+    assert "no `DATABRICKS_*` variable except" not in fixes
 
 
 def test_progress_md_records_the_contract_tests_that_run_the_stand_in_cli_and_the_real_one():

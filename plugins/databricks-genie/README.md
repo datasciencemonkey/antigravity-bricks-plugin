@@ -58,7 +58,7 @@ Set `DATABRICKS_CONFIG_PROFILE` to the profile's name in the environment Antigra
 
 If that profile doesn't exist yet, the agent sets it up the same way on first use.
 
-Genie is always called at the workspace of the Databricks CLI profile it uses, and that is the only place the profile's token goes. `DATABRICKS_HOST` and the other `DATABRICKS_*` sign-in variables in your environment are ignored, and the plugin doesn't pass them to the Databricks CLI. The only variables that choose a profile or a config file are `DATABRICKS_CONFIG_PROFILE` and `DATABRICKS_CONFIG_FILE`.
+Genie is always called at the workspace of the Databricks CLI profile it uses, and the plugin never takes a workspace from your environment, so an exported `DATABRICKS_HOST` doesn't change where it calls. The plugin itself reads only `DATABRICKS_CONFIG_PROFILE` and `DATABRICKS_CONFIG_FILE`. The Databricks CLI it runs gets your environment unchanged and reads its usual `DATABRICKS_*` variables, such as `DATABRICKS_AUTH_STORAGE`, as it does in your terminal.
 
 ## Headless runs
 
@@ -95,6 +95,7 @@ Each one works on its own in a new chat, so any of them is a good first question
 ## Troubleshooting
 
 - **Sign-in errors:** ask the agent to check the Genie connection, and it signs you in again if needed. Or run `databricks auth login --profile <name>` yourself.
+- **`DATABRICKS_HOST` or `DATABRICKS_TOKEN` in your shell:** the Databricks CLI reads them, as it does in your terminal. If your shell exports either one for another workspace, Genie can report a sign-in error. Unset them in the environment Antigravity starts from, restart Antigravity, and ask the agent to check the Genie connection.
 - **`unsupported_auth`:** your Databricks CLI profile signs in with a personal access token or a service principal. Genie here signs in with OAuth U2M through the Databricks CLI, so the agent won't use or change that profile. Set `DATABRICKS_CONFIG_PROFILE` to a new profile name and restart Antigravity, and the agent sets that one up.
 - **`profile_exists_unreadable`:** the same applies to a profile that `databricks auth profiles` doesn't list because it has no host, such as an Azure service principal, when the Databricks config file (`~/.databrickscfg`, or the file `DATABRICKS_CONFIG_FILE` names) holds keys for it. The agent reads only key names, never a value, and never signs in over those keys. Keys that come before the first header belong to the `DEFAULT` profile. A header with no keys under it holds nothing to lose, such as the empty `[DEFAULT]` header that `databricks configure` writes, so the agent sets that profile up as usual. Use a new profile name, as above.
 - **HTTP 403:** the workspace may only accept connections from certain networks (an IP access list). Connect to the VPN if it needs one, and try again.

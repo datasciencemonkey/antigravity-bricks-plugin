@@ -43,7 +43,8 @@ SHARED_FACTS = [
     "IDE 2.5.5",
     "doesn't run plugin MCP servers",
     "has no `~/.databrickscfg` yet, and that's fine: the first sign-in creates it",
-    "`DATABRICKS_HOST` and the other `DATABRICKS_*` sign-in variables in your environment are ignored",
+    "the plugin never takes a workspace from your environment",
+    "gets your environment unchanged and reads its usual `DATABRICKS_*` variables",
     TRADEMARK,
 ]
 
@@ -221,7 +222,8 @@ def test_troubleshooting_covers_403_unsupported_auth_timeouts_and_polling_again(
 
 
 @pytest.mark.parametrize(
-    "label", ["`profile_exists_unreadable`:", '"Genie returned a non-JSON page":', "A question times out:"]
+    "label", ["`profile_exists_unreadable`:", '"Genie returned a non-JSON page":', "A question times out:",
+              "`DATABRICKS_HOST` or `DATABRICKS_TOKEN` in your shell:"]
 )
 def test_troubleshooting_explains_the_follow_up_failures_in_the_same_words_in_both_readmes(label):
     assert troubleshooting_bullet(README, label) == troubleshooting_bullet(PLUGIN_README, label)
@@ -259,23 +261,44 @@ def test_profile_exists_unreadable_says_keys_count_an_empty_header_does_not_and_
 
 
 @pytest.mark.parametrize("path", DOCUMENTS)
-def test_use_another_profile_says_the_profiles_workspace_decides_where_its_token_goes(path):
+def test_use_another_profile_says_the_workspace_comes_from_the_profile_and_the_cli_keeps_its_environment(path):
     profile = section(path, "Use another Databricks CLI profile")
 
     for fact in ("always called at the workspace of the Databricks CLI profile it uses",
-                 "the only place the profile's token goes",
-                 "the plugin doesn't pass them to the Databricks CLI",
-                 "The only variables that choose a profile or a config file are `DATABRICKS_CONFIG_PROFILE` and "
-                 "`DATABRICKS_CONFIG_FILE`"):
+                 "the plugin never takes a workspace from your environment, so an exported `DATABRICKS_HOST` doesn't change "
+                 "where it calls",
+                 "The plugin itself reads only `DATABRICKS_CONFIG_PROFILE` and `DATABRICKS_CONFIG_FILE`",
+                 "The Databricks CLI it runs gets your environment unchanged and reads its usual `DATABRICKS_*` variables, "
+                 "such as `DATABRICKS_AUTH_STORAGE`, as it does in your terminal"):
         assert fact in profile, fact
+
+
+@pytest.mark.parametrize("path", DOCUMENTS)
+def test_the_readmes_no_longer_say_the_plugin_ignores_or_withholds_databricks_variables(path):
+    # The CLI owns its environment variables. An earlier wording had the plugin drop them before it ran the CLI.
+    for old in ("sign-in variables in your environment are ignored", "doesn't pass them to the Databricks CLI",
+                "doesn't pass it to the Databricks CLI", "the only place the profile's token goes"):
+        assert old not in read(path), old
+
+
+@pytest.mark.parametrize("path", DOCUMENTS)
+def test_troubleshooting_says_to_unset_a_databricks_host_or_token_exported_for_another_workspace(path):
+    entry = troubleshooting_bullet(path, "`DATABRICKS_HOST` or `DATABRICKS_TOKEN` in your shell:")
+
+    for fact in ("the Databricks CLI reads them, as it does in your terminal",
+                 "If your shell exports either one for another workspace, Genie can report a sign-in error",
+                 "Unset them in the environment Antigravity starts from", "restart Antigravity",
+                 "ask the agent to check the Genie connection"):
+        assert fact in entry, fact
 
 
 def test_the_security_section_says_where_the_token_goes_and_when_a_profile_is_profile_exists_unreadable():
     security = section(README, "Security")
     (where,) = [line for line in security.splitlines() if line.startswith("- **Where your token goes:**")]
 
-    for fact in ("workspace of the Databricks CLI profile it came from", "`DATABRICKS_HOST`", "`DATABRICKS_*` sign-in variables",
-                 "doesn't pass them to the Databricks CLI"):
+    for fact in ("only to the workspace of the Databricks CLI profile the plugin uses",
+                 "never takes a workspace from your environment", "an exported `DATABRICKS_HOST` can't make it call, or send "
+                 "a token to, another host"):
         assert fact in where, fact
     assert "one that the CLI doesn't list but that has settings in the Databricks config file gets `profile_exists_unreadable`" in security
 
