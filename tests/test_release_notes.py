@@ -30,14 +30,20 @@ def sha(number):
 
 
 SHAS = {sha(number) for number in range(1, 1000)}
+REPO = "owner/repo"  # the repository the notes are for
+FORK = "someone-else/repo"
 
 
-def pr(number, title="A change", body=None, commit=None, merged_at="2026-10-23T10:00:00Z"):
-    """One item of the JSON that `gh api repos/.../pulls` returns, with the fields the tool reads."""
+def pr(number, title="A change", body=None, commit=None, merged_at="2026-10-23T10:00:00Z", source=REPO, association="OWNER"):
+    """One item of the JSON that `gh api repos/.../pulls` returns, with the fields the tool reads.
+
+    By default the pull request comes from a branch of REPO and its author is the owner. source is the repository its
+    head branch lives in; association is the author's `author_association`.
+    """
     commit = commit or sha(number)
     return {
-        "number": number, "title": title, "body": body, "merged_at": merged_at,
-        "merge_commit_sha": commit, "head": {"sha": commit},
+        "number": number, "title": title, "body": body, "merged_at": merged_at, "author_association": association,
+        "merge_commit_sha": commit, "head": {"sha": commit, "repo": {"full_name": source}},
     }
 
 
@@ -164,8 +170,8 @@ def test_the_attribution_line_never_reaches_the_summary_bullets(body, expected):
 # --- the notes -------------------------------------------------------------------------------------------------
 
 
-def notes_for(*pulls, previous="v0.3.0", shas=SHAS):
-    return release_notes.build_notes(list(pulls), shas, previous)
+def notes_for(*pulls, previous="v0.3.0", shas=SHAS, repo=REPO):
+    return release_notes.build_notes(list(pulls), shas, repo, previous)
 
 
 def test_each_pull_request_shows_its_title_its_number_and_its_summary_bullets():
@@ -231,14 +237,14 @@ def test_a_pull_request_that_appears_twice_is_listed_once():
 
 
 def test_without_a_previous_tag_every_merged_pull_request_is_listed():
-    notes = release_notes.build_notes([pr(1, "One"), pr(2, "Two")], SHAS, None)
+    notes = release_notes.build_notes([pr(1, "One"), pr(2, "Two")], SHAS, REPO)
 
     assert notes == "## Pull requests\n\n- One (#1)\n- Two (#2)\n"
 
 
 def test_no_pull_requests_gives_a_plain_sentence():
     assert notes_for() == "## Pull requests since v0.3.0\n\nNo pull requests were merged since v0.3.0.\n"
-    assert release_notes.build_notes([], SHAS, None) == "## Pull requests\n\nNo pull requests have been merged yet.\n"
+    assert release_notes.build_notes([], SHAS, REPO) == "## Pull requests\n\nNo pull requests have been merged yet.\n"
 
 
 @pytest.mark.parametrize("number", [True, None, "7", 7.5, [7], {"n": 7}])
@@ -258,7 +264,78 @@ def test_items_that_are_not_pull_request_objects_are_skipped():
 )
 def test_a_previous_tag_that_is_not_a_release_tag_is_refused(tag):
     with pytest.raises(ValueError):
-        release_notes.build_notes([], SHAS, tag)
+        release_notes.build_notes([], SHAS, REPO, tag)
+
+
+# --- whose text may reach the notes -------------------------------------------------------------------------------
+
+
+def test_a_pull_request_from_a_fork_is_left_out_even_though_its_commit_is_on_main():
+    # Anyone can open a pull request from a fork at the head commit of a branch we publish. When our fast-forward
+    # brings that commit onto main, GitHub marks their pull request merged, and a stranger wrote its title and body.
+    forged = pr(2, "Forged title", "## Summary\n- Forged bullet.\n", source=FORK)
+
+    notes = notes_for(forged, pr(3, "Ours", "## Summary\n- Our bullet.\n"))
+
+    assert "Forged" not in notes and "(#2)" not in notes
+    assert notes == "## Pull requests since v0.3.0\n\n- Ours (#3)\n  - Our bullet.\n"
+
+
+@pytest.mark.parametrize("association", ["OWNER", "MEMBER", "COLLABORATOR"])
+def test_pull_requests_by_the_owner_members_and_collaborators_are_listed(association):
+    assert "- Fine (#4)" in notes_for(pr(4, "Fine", association=association))
+
+
+@pytest.mark.parametrize(
+    "association",
+    ["CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER", "MANNEQUIN", "NONE", "owner", "Owner", "", None, 5, ["OWNER"]],
+)
+def test_pull_requests_by_anyone_else_are_left_out(association):
+    outsider = pr(4, "Outsider", "## Summary\n- Outsider bullet.\n", association=association)
+
+    notes = notes_for(outsider)
+
+    assert "Outsider" not in notes and "(#4)" not in notes
+
+
+def test_a_pull_request_with_no_author_association_at_all_is_left_out():
+    unknown = pr(4, "Unknown")
+    del unknown["author_association"]
+
+    assert "(#4)" not in notes_for(unknown)
+
+
+def test_a_fork_by_the_owner_is_still_left_out():
+    assert "(#4)" not in notes_for(pr(4, "From the owner's other copy", source=FORK, association="OWNER"))
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        None, "x", [], {}, {"sha": sha(4)}, {"sha": sha(4), "repo": None}, {"sha": sha(4), "repo": "owner/repo"},
+        {"sha": sha(4), "repo": {}}, {"sha": sha(4), "repo": {"full_name": None}}, {"sha": sha(4), "repo": {"full_name": 5}},
+        {"sha": sha(4), "repo": {"name": "repo"}},
+    ],
+)
+def test_a_pull_request_whose_source_repository_is_unknown_is_left_out(head):
+    # A deleted fork has no head repository at all.
+    unknown = pr(4, "Unknown source")
+    unknown["head"] = head
+
+    assert "(#4)" not in notes_for(unknown)
+
+
+def test_the_repository_name_is_compared_without_regard_to_case():
+    assert "- Fine (#4)" in notes_for(pr(4, "Fine", source="Owner/Repo"))
+    assert "(#4)" not in notes_for(pr(4, "Fine"), repo="other/repo")
+
+
+@pytest.mark.parametrize(
+    "repo", ["", "owner", "owner/", "/repo", "a/b/c", "owner/re po", "owner/repo\n", "owner/repo;rm", "owner\\repo", 5, None, ["owner/repo"]]
+)
+def test_a_repository_that_is_not_owner_slash_name_is_refused(repo):
+    with pytest.raises(ValueError):
+        release_notes.build_notes([], SHAS, repo)
 
 
 # --- hostile text -------------------------------------------------------------------------------------------------
@@ -377,7 +454,7 @@ def test_the_whole_notes_stay_under_their_cap_and_say_how_many_were_left_out():
     summary = "## Summary\n" + "".join(f"- {'word ' * 60}{index}\n" for index in range(12))
     pulls = [pr(number, f"Change {number}", summary) for number in range(1, 600)]
 
-    notes = release_notes.build_notes(pulls, {sha(number) for number in range(1, 600)}, "v0.3.0")
+    notes = release_notes.build_notes(pulls, {sha(number) for number in range(1, 600)}, REPO, "v0.3.0")
 
     assert len(notes) <= release_notes.NOTES_MAX
     assert re.fullmatch(r"- …and \d+ more pull requests\b.*", notes.splitlines()[-1])
@@ -491,12 +568,14 @@ def history(repo, monkeypatch):
     return repo, pulls, two
 
 
-def run(tmp_path, pulls, head, extra=()):
+def run(tmp_path, pulls, head, repo=REPO, extra=()):
     source = tmp_path / "pulls.json"
     source.write_text(pulls if isinstance(pulls, str) else json.dumps(pulls))
     output = tmp_path / "notes.md"
     # --head=VALUE, so that a value which looks like an option reaches the tool's own check instead of argparse's
-    code = release_notes.main(["--pulls", str(source), f"--head={head}", "--output", str(output), *extra])
+    code = release_notes.main(
+        ["--pulls", str(source), f"--head={head}", f"--repo={repo}", "--output", str(output), *extra]
+    )
     return code, output
 
 
@@ -527,9 +606,41 @@ def test_the_command_line_reads_standard_input_unless_given_a_file(history, tmp_
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(pulls)))
     output = tmp_path / "notes.md"
 
-    code = release_notes.main(["--head", head, "--output", str(output)])
+    code = release_notes.main(["--head", head, "--repo", REPO, "--output", str(output)])
 
     assert code == 0 and "- Two (#3)" in output.read_text()
+
+
+def test_the_command_line_leaves_out_pull_requests_from_forks_and_from_outsiders(history, tmp_path):
+    _, pulls, head = history
+    pulls += [
+        pr(4, "From a fork", "## Summary\n- Forged.\n", commit=head, source=FORK),
+        pr(5, "From a stranger", "## Summary\n- Also forged.\n", commit=head, association="NONE"),
+    ]
+
+    code, output = run(tmp_path, pulls, head)
+
+    assert code == 0
+    assert output.read_text() == "## Pull requests since v0.3.0\n\n- One (#2)\n- Two (#3)\n"
+
+
+def test_the_command_line_has_to_be_told_which_repository_the_pull_requests_must_come_from(history, tmp_path):
+    _, _, head = history
+
+    with pytest.raises(SystemExit) as stop:
+        release_notes.main(["--head", head, "--output", str(tmp_path / "notes.md")])
+
+    assert stop.value.code == 2 and not (tmp_path / "notes.md").exists()
+
+
+@pytest.mark.parametrize("name", ["", "owner", "a/b/c", "owner/re po", "owner/repo\n"])
+def test_a_repository_that_is_not_owner_slash_name_fails_the_command_line(name, history, tmp_path, capsys):
+    _, pulls, head = history
+
+    code, output = run(tmp_path, pulls, head, repo=name)
+
+    assert code != 0 and not output.exists()
+    assert capsys.readouterr().err.startswith("release_notes:")
 
 
 def test_hostile_text_is_written_as_text_and_nothing_runs(history, tmp_path):
@@ -567,10 +678,14 @@ def test_unreadable_json_fails_without_echoing_it(history, tmp_path, capsys):
 def test_a_missing_pulls_file_or_a_missing_output_folder_fails(history, tmp_path, capsys):
     _, pulls, head = history
 
-    missing_input = release_notes.main(["--pulls", str(tmp_path / "none.json"), "--head", head, "--output", str(tmp_path / "n.md")])
+    missing_input = release_notes.main(
+        ["--pulls", str(tmp_path / "none.json"), "--head", head, "--repo", REPO, "--output", str(tmp_path / "n.md")]
+    )
     source = tmp_path / "pulls.json"
     source.write_text(json.dumps(pulls))
-    missing_folder = release_notes.main(["--pulls", str(source), "--head", head, "--output", str(tmp_path / "no" / "n.md")])
+    missing_folder = release_notes.main(
+        ["--pulls", str(source), "--head", head, "--repo", REPO, "--output", str(tmp_path / "no" / "n.md")]
+    )
 
     assert missing_input != 0 and missing_folder != 0
     assert capsys.readouterr().err.count("release_notes:") == 2

@@ -144,7 +144,8 @@ def test_the_notes_are_built_by_release_notes_py_and_reach_gh_only_as_a_file():
     create = next(line for line in script.splitlines() if "gh release create" in line)
 
     assert 'gh api --paginate "repos/{owner}/{repo}/pulls?state=closed&base=main' in script
-    assert 'python3 tools/release_notes.py --pulls "$PULLS" --head "$HEAD_SHA" --output "$NOTES"' in script
+    # --repo: only pull requests from branches of this repository, by its owner, members and collaborators, are listed
+    assert 'python3 tools/release_notes.py --repo "$GH_REPO" --pulls "$PULLS" --head "$HEAD_SHA" --output "$NOTES"' in script
     assert '--notes-file "$NOTES"' in create and "--generate-notes" in create  # ours first, then GitHub's generated list
     assert "--notes " not in create and "--notes=" not in create  # never the text itself on the command line
     assert script.index("tools/release_notes.py") < script.index("gh release create")
@@ -184,11 +185,14 @@ sys.exit(0)
 """
 
 
-def pull(number, title, commit, body=None):
-    """One item of the JSON that `gh api repos/<owner>/<repo>/pulls` returns."""
+def pull(number, title, commit, body=None, source="owner/repo", association="OWNER"):
+    """One item of the JSON that `gh api repos/<owner>/<repo>/pulls` returns (the harness runs as owner/repo).
+
+    source is the repository the head branch lives in and association the author's `author_association`.
+    """
     return {
         "number": number, "title": title, "body": body, "merged_at": f"2026-10-23T10:{number:02d}:00Z",
-        "merge_commit_sha": commit, "head": {"sha": commit},
+        "author_association": association, "merge_commit_sha": commit, "head": {"sha": commit, "repo": {"full_name": source}},
     }
 
 
@@ -356,6 +360,22 @@ def test_the_release_gets_a_notes_file_of_the_pull_requests_merged_since_the_pre
         "## Pull requests since v0.3.0\n\n- Bump the version (#2)\n  - Fixes the thing.\n  - Needs no setup.\n"
     )
     assert [call[0] for call in checkout_dir.gh_calls()] == ["release", "api", "release"]  # view, the pulls, create
+
+
+def test_the_notes_leave_out_pull_requests_from_forks_and_from_outsiders(checkout_dir):
+    # A pull request opened from a fork at a commit we publish is marked merged when our fast-forward lands that commit.
+    checkout_dir.set_version("0.3.1")
+    pulls = [
+        pull(2, "Ours", checkout_dir.head, "## Summary\n- Fixes the thing.\n"),
+        pull(3, "From a fork", checkout_dir.head, "## Summary\n- Forged.\n", source="someone-else/repo"),
+        pull(4, "From a stranger", checkout_dir.head, "## Summary\n- Also forged.\n", association="NONE"),
+    ]
+
+    result = checkout_dir.run(pulls=pulls)
+
+    assert result.returncode == 0, result.stderr
+    (entry,) = checkout_dir.create_entries()
+    assert entry["notes"] == "## Pull requests\n\n- Ours (#2)\n  - Fixes the thing.\n"
 
 
 def test_the_first_release_lists_every_merged_pull_request(checkout_dir):

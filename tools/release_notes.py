@@ -1,11 +1,16 @@
 """Build release notes from the pull requests merged since the previous release tag.
 
 The release workflow gives this the JSON that `gh api --paginate "repos/<owner>/<repo>/pulls?state=closed&base=main"`
-prints (a file, or standard input) and the full SHA of the commit being released. It lists every pull request whose
-commit lies in the history of that commit after the previous v<major>.<minor>.<patch> tag (in all of it when there is
-no such tag yet) and writes Markdown to a file: for each pull request its title, its number and the bullets of its
-"## Summary" section, or just the title when it has none. The workflow passes the file to
+prints (a file, or standard input), the OWNER/REPO name and the full SHA of the commit being released. It lists every
+pull request whose commit lies in the history of that commit after the previous v<major>.<minor>.<patch> tag (in all
+of it when there is no such tag yet) and writes Markdown to a file: for each pull request its title, its number and
+the bullets of its "## Summary" section, or just the title when it has none. The workflow passes the file to
 `gh release create --notes-file`, and GitHub adds its own generated list after it.
+
+Only some pull requests may put text into the notes: those whose head branch lives in OWNER/REPO itself and whose
+author is the repository's owner, a member or a collaborator. Anyone can open a pull request from a fork at the head
+commit of a branch we publish, and when we fast-forward main to that commit GitHub marks their pull request merged,
+so "merged" alone doesn't say who wrote the title and the description.
 
 Pull request titles and bodies are untrusted text. They are only parsed and written to the notes file: never put on a
 command line, never given to a shell. The only command this tool runs is git, as a list of arguments, with a tag or
@@ -48,6 +53,10 @@ BULLET = re.compile(r"[ \t]*(?:[-*+]|\d{1,9}[.)])(?:[ \t]+(.*))?")
 # block or comment (<), or a link reference definition ([), which defines a link for the whole document.
 BLOCK_START = re.compile(r"[#>+*=|<\[-]|`{3}|~{3}")
 ORDERED = re.compile(r"(\d{1,9})([.)])")
+
+# Whose pull requests may appear (the API's author_association), and what a repository name looks like.
+TRUSTED_AUTHORS = ("OWNER", "MEMBER", "COLLABORATOR")
+REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 
 
 def check_sha(value):
@@ -204,15 +213,26 @@ def text_of(value):
     return value if isinstance(value, str) else ""
 
 
-def read_pull(item):
-    """A Pull from one item of the API's JSON, or None if the item isn't a merged pull request with a whole number."""
+def read_pull(item, repo):
+    """A Pull from one item of the API's JSON, or None if the item may not appear in the notes.
+
+    It must be a merged pull request with a whole number, from a branch of repo itself (a deleted or unknown source
+    repository doesn't count), by the owner, a member or a collaborator.
+    """
     if not isinstance(item, dict):
         return None
     number, merged_at = item.get("number"), item.get("merged_at")
     if isinstance(number, bool) or not isinstance(number, int) or not isinstance(merged_at, str) or not merged_at:
         return None
     head = item.get("head")
-    commits = (item.get("merge_commit_sha"), head.get("sha") if isinstance(head, dict) else None)
+    head = head if isinstance(head, dict) else {}
+    source = head.get("repo")
+    source = source.get("full_name") if isinstance(source, dict) else None
+    if not isinstance(source, str) or source.lower() != repo.lower():  # repository names ignore case
+        return None
+    if item.get("author_association") not in TRUSTED_AUTHORS:
+        return None
+    commits = (item.get("merge_commit_sha"), head.get("sha"))
     return Pull(
         number, text_of(item.get("title")), text_of(item.get("body")), merged_at,
         tuple(commit for commit in commits if isinstance(commit, str)),
@@ -231,18 +251,21 @@ def render(pull):
     return lines
 
 
-def build_notes(pulls, shas, previous=None):
+def build_notes(pulls, shas, repo, previous=None):
     """The Markdown for the pull requests in pulls that were merged in the commits in shas, oldest first.
 
-    previous is the release tag the notes start after, if any. A pull request counts when its merge commit or its head
-    commit is in shas, so merges made on GitHub and fast-forwards both work. Items that aren't merged pull requests,
-    and repeats of the same number, are skipped.
+    repo is the OWNER/REPO the pull requests must come from (see read_pull). previous is the release tag the notes
+    start after, if any. A pull request counts when its merge commit or its head commit is in shas, so merges made on
+    GitHub and fast-forwards both work. Items that aren't merged pull requests from repo by someone trusted, and
+    repeats of the same number, are skipped.
     """
+    if not isinstance(repo, str) or not REPO.fullmatch(repo):
+        raise ValueError(f"not an OWNER/REPO name: {str(repo)[:60]!r}")
     if previous is not None and not TAG.fullmatch(previous):
         raise ValueError(f"not a release tag: {str(previous)[:40]!r}")
     heading = f"## Pull requests since {previous}" if previous else "## Pull requests"
     merged = {}
-    for pull in filter(None, map(read_pull, pulls)):
+    for pull in filter(None, (read_pull(item, repo) for item in pulls)):
         if any(commit in shas for commit in pull.commits):
             merged.setdefault(pull.number, pull)
     ordered = sorted(merged.values(), key=lambda pull: (pull.merged_at, pull.number))
@@ -268,6 +291,9 @@ def main(argv=None):
     )
     parser.add_argument("--pulls", default="-", help="the JSON from gh api: a file, or - for standard input (default)")
     parser.add_argument("--head", required=True, help="the full SHA of the commit being released")
+    parser.add_argument(
+        "--repo", required=True, help="OWNER/REPO: only pull requests from branches of this repository are listed"
+    )
     parser.add_argument("--output", required=True, type=Path, help="the file to write the notes to")
     args = parser.parse_args(argv)
     try:
@@ -275,7 +301,7 @@ def main(argv=None):
         text = sys.stdin.read() if args.pulls == "-" else Path(args.pulls).read_text(encoding="utf-8")
         pulls = load_pulls(text)
         tag = previous_tag(args.head)
-        notes = build_notes(pulls, commits_since(tag, args.head), tag)
+        notes = build_notes(pulls, commits_since(tag, args.head), args.repo, tag)
         args.output.write_text(notes, encoding="utf-8")
     except subprocess.CalledProcessError as problem:
         reason = (problem.stderr or "").strip().splitlines()

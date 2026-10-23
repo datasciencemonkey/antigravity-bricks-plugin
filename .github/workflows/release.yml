@@ -57,5 +57,5 @@ jobs:
           PULLS="$RUNNER_TEMP/pulls.json"
           NOTES="$RUNNER_TEMP/release-notes.md"
           gh api --paginate "repos/{owner}/{repo}/pulls?state=closed&base=main&per_page=100" > "$PULLS"
-          python3 tools/release_notes.py --pulls "$PULLS" --head "$HEAD_SHA" --output "$NOTES"
+          python3 tools/release_notes.py --repo "$GH_REPO" --pulls "$PULLS" --head "$HEAD_SHA" --output "$NOTES"
           gh release create "$TAG" --target "$HEAD_SHA" --title "$TAG" --notes-file "$NOTES" --generate-notes
