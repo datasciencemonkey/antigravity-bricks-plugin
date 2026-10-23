@@ -156,11 +156,11 @@ def test_the_versions_rule_bumps_only_the_last_number_and_leaves_tagging_to_the_
         assert fact in rule, fact
 
 
-def test_the_versions_rule_describes_the_test_as_strict_about_major_and_minor():
-    rule = bullet(working_rules(), "- **Versions:**")
+def test_agents_md_describes_the_version_gate_as_strict_about_major_and_minor():
+    # It says so in What we know. The working rules' Versions line is left alone: the release workflow PR rewrites it.
+    note = bullet(what_we_know(), "- The manifest ships `author` and `license` anyway")
 
-    assert "keeps the merge-base's major and minor and has a higher last number" in rule
-    assert "the version isn't higher" not in rule
+    assert "keeps the merge-base's major and minor and has a higher last number" in note
 
 
 def test_progress_md_describes_the_version_gate_as_a_bump_of_only_the_last_number():
@@ -183,3 +183,29 @@ def test_progress_md_no_longer_lists_the_repo_url_install_as_untested_while_priv
 
     assert "untested while the repo is private" not in text
     assert "~~Install from the GitHub repo URL" in text
+
+
+def test_progress_md_hard_codes_no_test_count_because_it_goes_stale_with_the_next_test():
+    assert re.search(r"\b\d+ tests\b", PROGRESS.read_text()) is None
+
+
+def test_progress_md_explains_profile_switching_without_launchctl_and_keeps_the_note_that_it_is_untested_live():
+    item = bullet(section(PROGRESS, "### The plugin (`plugins/databricks-genie/`)"), "- README: explain how to point")
+
+    for fact in ("DATABRICKS_CONFIG_PROFILE=<name> agy", "open -a Antigravity --env DATABRICKS_CONFIG_PROFILE=<name>",
+                 "Not `launchctl setenv`, which reaches every app opened until logout",
+                 "still need checking live with a second profile"):
+        assert fact in item, fact
+
+
+def test_the_first_use_decision_does_not_promise_the_ide_behaves_like_the_other_surfaces():
+    decision = bullet(section(AGENTS, "## Decisions"), "- First-use setup")
+
+    assert "every surface that runs the plugin behaves the same (the IDE waits on Google, #30)" in decision
+    assert "the desktop app and the IDE behave the same" not in decision
+
+
+def test_the_public_docs_name_no_internal_tool():
+    internal_tool = "FE" "VM"  # split, so this file doesn't contain the name either
+    for path in (AGENTS, PROGRESS, REPO_ROOT / "README.md", REPO_ROOT / "plugins" / "databricks-genie" / "README.md"):
+        assert internal_tool not in path.read_text(), path.name
