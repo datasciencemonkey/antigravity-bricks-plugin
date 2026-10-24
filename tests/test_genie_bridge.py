@@ -2631,3 +2631,56 @@ def test_a_follow_up_in_a_named_profile_that_times_out_says_to_cancel_it_in_the_
     message = timed_out_in_profile_b(monkeypatch, capsys, loaded, "genie_ask", {"question": "By region?", "conversation_id": "c-1"})
 
     assert "genie_cancel_response with conversation_id c-1 and profile B" in message
+
+
+# genie_connection lists the profiles (#49), so the agent can match a workspace the user names: each one's name, host and auth
+# type, and nothing else the CLI says about it.
+
+
+def test_genie_connection_lists_each_profiles_name_host_and_auth_type_with_every_report(start, genie, other, cli):
+    cli.set_profiles({"DEMO": genie.base, "B": other.base}, extra=(
+        f"[pat]\nhost = {WORKSPACE}\nauth_type = pat\ntoken = {SECRET}\n\n[acct]\naccount_id = abc-123\n\n"
+        + azure_service_principal("SP")))
+    bridge = start(GENIE_MCP_URL="")
+    _, default = bridge.connection(3)
+    bridge.send(call("genie_connection", {"profile": "B"}, number=4))
+    named = report_of(bridge.reply())
+    bridge.send(call("genie_connection", {"profile": "pat"}, number=5))
+    unsupported = report_of(bridge.reply())
+    stderr = bridge.close()
+
+    listed = [{"name": "DEMO", "host": genie.base, "auth_type": "databricks-cli"},
+              {"name": "B", "host": other.base, "auth_type": "databricks-cli"},
+              {"name": "pat", "host": WORKSPACE, "auth_type": "pat"},
+              {"name": "acct", "host": None, "auth_type": ""}]
+    assert (default["status"], named["status"], unsupported["status"]) == ("ready", "ready", "unsupported_auth")
+    assert default["profiles"] == named["profiles"] == unsupported["profiles"] == listed
+    assert SECRET not in "".join(bridge.output) + stderr
+
+
+def test_genie_connection_passes_on_only_the_name_host_and_auth_type_of_each_profile_the_cli_lists(start, cli, any_cli):
+    # The real CLI says more about each profile, such as its cloud, its account_id and whether it's valid. None of that is passed on.
+    cli.set_config(f"[dev]\nhost = {WORKSPACE}\nauth_type = databricks-cli\n\n[pat]\nhost = {WORKSPACE}\nauth_type = pat\n"
+                   f"token = {SECRET}\n\n[acct]\nhost = https://accounts.cloud.databricks.com\naccount_id = made-up-account\n\n"
+                   + azure_service_principal("NEW"))
+    bridge = start(GENIE_BRIDGE_DATABRICKS_CLI=any_cli, DATABRICKS_CONFIG_PROFILE="NEW")
+    bridge.send(call("genie_connection"))
+    report = report_of(bridge.reply(timeout=60))
+
+    assert report["status"] == "profile_exists_unreadable"
+    assert sorted(profile["name"] for profile in report["profiles"]) == ["acct", "dev", "pat"]
+    assert all(set(profile) == {"name", "host", "auth_type"} for profile in report["profiles"])
+    assert SECRET not in json.dumps(report) and "made-up-account" not in json.dumps(report)
+
+
+@pytest.mark.parametrize("why", ["the CLI can't list them", "the CLI is missing"])
+def test_genie_connection_still_answers_when_the_profiles_cannot_be_listed(start, cli, tmp_path, why):
+    # GENIE_MCP_URL points at the test server, so the profile is ready without a listing of its own.
+    env = {"FAKE_PROFILES_FAIL": "1"} if why == "the CLI can't list them" else {"GENIE_BRIDGE_DATABRICKS_CLI": str(tmp_path / "none")}
+    bridge = start(**env)
+    bridge.send(call("genie_connection"))
+    reply = bridge.reply()
+
+    assert "isError" not in reply["result"], text_of(reply)
+    assert report_of(reply)["status"] == ("ready" if why == "the CLI can't list them" else "cli_missing")
+    assert "profiles" not in report_of(reply)

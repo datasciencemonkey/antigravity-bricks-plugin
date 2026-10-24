@@ -942,7 +942,16 @@ def call_tool(message, context):
     name = params.get("name")
     arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
     if name == "genie_connection":
-        return [tool_result(message, json.dumps(connection(workspace_for(context, chosen_profile(arguments))), indent=2))]
+        workspace = workspace_for(context, chosen_profile(arguments))
+        state = connection(workspace)
+        if "profiles" not in state:  # every profile's name, host and auth type, to match a workspace the user names
+            try:
+                state["profiles"] = workspace["cli"].profiles()
+            except OutOfTime:
+                raise
+            except BridgeError:
+                pass  # the connection's status still stands; only the list to match a workspace by is missing
+        return [tool_result(message, json.dumps(state, indent=2))]
     if name == "genie_setup":
         return [tool_result(message, json.dumps(setup(arguments, context), indent=2))]
     workspace = genie_workspace(context, arguments)
