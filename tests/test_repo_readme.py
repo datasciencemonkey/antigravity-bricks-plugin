@@ -404,3 +404,36 @@ def test_the_plugins_readme_does_not_promise_the_ide_shares_the_setup():
 def test_no_bullet_is_glued_onto_the_line_before_it(document):
     glued = [n for n, line in enumerate(document.read_text().splitlines(), 1) if re.search(r"[.:)]- \*\*", line)]
     assert not glued, f"{document.name} lines {glued} hold a bullet that should start its own line"
+
+
+# Asking in another workspace (#49)
+
+
+@pytest.mark.parametrize("path", DOCUMENTS)
+def test_ask_in_another_workspace_keeps_the_default_and_says_how_to_name_or_switch_a_workspace(path):
+    body = " ".join(section(path, "Ask in another workspace").split())
+
+    for fact in ("Your default Databricks CLI profile stays as it is", "In profile B", "in my sales workspace",
+                 "Only that part goes there; the rest, and later questions, go to your default",
+                 "use workspace B from now on", "back to my default", "Other chats and new sessions start on your default",
+                 "asks you whenever more than one could match or none does", "It never picks one for you",
+                 "offers to set one up under a name you pick", "same browser sign-in as first use",
+                 "says which numbers came from where", WORKSPACE_LINE,
+                 "follow-ups stay in the workspace where the conversation started", "OAuth U2M"):
+        assert fact in body, fact
+
+
+def test_both_readmes_explain_asking_in_another_workspace_in_the_same_words():
+    assert section(README, "Ask in another workspace") == section(PLUGIN_README, "Ask in another workspace")
+
+
+def test_the_readmes_name_the_profile_skill_where_they_say_what_the_plugin_holds():
+    assert "a second skill for asking Genie in another workspace" in section(README, "What it does")
+    assert "**The `select-databricks-profile` skill.**" in section(PLUGIN_README, "What's inside")
+
+
+def test_the_security_section_says_where_another_workspaces_token_goes():
+    security = section(README, "Security")
+    (where,) = [line for line in security.splitlines() if line.startswith("- **Where your token goes:**")]
+
+    assert "When you ask in another workspace, that profile's token goes only to that profile's own workspace" in where

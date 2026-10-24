@@ -6,6 +6,7 @@ Ask Databricks Genie about your governed data from Antigravity's agent, and turn
 
 - **A local Genie bridge** (`scripts/genie_bridge.py`), a small Python script that uses only the standard library. It connects Antigravity to the Genie One MCP server in your workspace and signs every request with a fresh token from your Databricks CLI login. No tokens are stored in Antigravity's settings. It adds two tools of its own: `genie_connection` shows which workspace and Databricks CLI profile Genie uses, and `genie_setup` sets up the Databricks CLI profile on first use.
 - **The `antigravity-databricks-genie` skill.** It teaches the agent how to connect, ask Genie, wait for the answer, and use Genie's SQL.
+- **The `select-databricks-profile` skill.** It teaches the agent to ask Genie in another workspace, by its Databricks CLI profile, for the part of a question that belongs there, without changing the default.
 - **An always-on rule.** It sends data questions to Genie instead of guesswork.
 
 ## Before you install
@@ -48,6 +49,17 @@ The plugin uses your `DEFAULT` Databricks CLI profile. The first time you ask Ge
 When a sign-in expires, the agent signs you in again to the same workspace. `genie_setup` never changes which workspace an existing profile points to. A machine that has never used the Databricks CLI has no `~/.databrickscfg` yet, and that's fine: the first sign-in creates it. You can also sign in yourself: `databricks auth login --host https://<workspace>.cloud.databricks.com --profile DEFAULT`.
 
 The setup lives only in the Databricks CLI's own config, so the Antigravity CLI and the desktop app use the same profile.
+
+## Ask in another workspace
+
+Your default Databricks CLI profile stays as it is, and you can still ask Genie in another workspace:
+
+- **For one question, or part of one:** name the workspace or the profile in the question, as in "In profile B, …" or "… and in my sales workspace". Only that part goes there; the rest, and later questions, go to your default.
+- **For the rest of a chat:** say "use workspace B from now on", and every question in that chat goes there until you say "back to my default". Other chats and new sessions start on your default.
+- **Picking the profile:** the agent lists your Databricks CLI profiles and their hosts, and asks you whenever more than one could match or none does. It never picks one for you. For a workspace with no profile yet, it offers to set one up under a name you pick, with the same browser sign-in as first use.
+- **Questions that span workspaces:** the agent asks each workspace's Genie its own part, then combines the answers and says which numbers came from where.
+
+Before each question the agent still says "Asking Genie in <host> (Databricks CLI profile <profile>)", so you can see where each part goes, and follow-ups stay in the workspace where the conversation started. As with the default, only profiles that sign in with OAuth U2M work.
 
 ## Use another Databricks CLI profile
 

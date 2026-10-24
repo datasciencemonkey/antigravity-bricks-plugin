@@ -103,7 +103,7 @@ def test_agents_md_says_why_the_manifest_ships_author_and_license_but_leaves_out
 
     for fact in ("`author`", "`license`", "`category`", "`tags`", "--strict", "unknown field"):
         assert fact in note, fact
-    for fact in ("follows the app", "`category` or `tags`", "version 0.3.2"):
+    for fact in ("follows the app", "`category` or `tags`", "version 0.3.3"):
         assert fact in review, fact
 
 
@@ -350,4 +350,31 @@ def test_progress_md_records_the_contract_tests_that_run_the_stand_in_cli_and_th
 
     for fact in ("stand-in `databricks` CLI", "CLI v1.22.1", "the real CLI when it's installed", "temporary folder as HOME",
                  "neither reads the real `~/.databrickscfg`"):
+        assert fact in item, fact
+
+
+# Asking in another workspace (#49)
+
+
+def test_the_select_profile_decision_says_what_was_built_what_stays_and_what_was_left_out():
+    decision = bullet(decisions(), "- Select profile (#49, the user, 2026-10-23)")
+
+    for fact in ("The default profile never changes", "Genie's tools and `genie_connection` take an optional `profile`",
+                 "`databricks auth profiles`", "`databricks auth token --profile <name>`", "a Genie One session per profile",
+                 "takes `profile` out of each call", "lists every profile's name, host and auth type, and nothing else",
+                 "`genie_setup` takes a `profile` for a new one under a name the user picks", "`select-databricks-profile`",
+                 "it never picks one", "from now on", "until they switch back", "which numbers came from where",
+                 "A conversation stays in its workspace", "in memory", "`agy -p` starts a new bridge each turn",
+                 "U2M only", "the account-console refusal", "pinned on 0.3.2", "service principals (#39)",
+                 "The plugin is version 0.3.3"):
+        assert fact in decision, fact
+
+
+def test_progress_md_lists_asking_in_another_workspace_and_that_it_waits_on_a_live_check():
+    item = bullet(section(PROGRESS, "### The plugin (`plugins/databricks-genie/`)"), "- Ask in another workspace (#49)")
+
+    for fact in ("the default Databricks CLI profile never changes", "only that part of a question", "from now on",
+                 "an optional `profile`", "lists each profile's name, host and auth type", "under a name the user picks",
+                 "`select-databricks-profile`", "every follow-up and poll, every turn",
+                 "Tests pinned what a call that names no profile returns on 0.3.2", "still to be shown working live"):
         assert fact in item, fact

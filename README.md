@@ -8,11 +8,12 @@ Genie finds the right tables in your Databricks workspace, runs SQL on a SQL war
 
 - Gives the Antigravity agent Genie's tools: ask a question in plain language, wait for the answer, fetch complete result rows, follow up in the same conversation, and cancel a slow question.
 - Shows where each question goes. Before it asks, the agent says "Asking Genie in <host> (Databricks CLI profile <profile>)".
+- Asks Genie in another workspace when you name one, for that part of a question only, and keeps your default Databricks CLI profile as it is (see [Ask in another workspace](#ask-in-another-workspace)).
 - Sets itself up the first time you use it. If your Databricks CLI profile isn't set up, the agent asks for your workspace URL and opens a browser window for you to sign in.
 - Brings Genie's SQL into your project, for example as a query file.
 - Signs in with your own Databricks CLI login. Antigravity and the plugin store no secrets.
 
-The plugin is in [`plugins/databricks-genie/`](plugins/databricks-genie): a small Python script that connects Antigravity to the Genie One MCP server in your workspace, a skill that teaches the agent how to use Genie, and an always-on rule that sends data questions to Genie.
+The plugin is in [`plugins/databricks-genie/`](plugins/databricks-genie): a small Python script that connects Antigravity to the Genie One MCP server in your workspace, a skill that teaches the agent how to use Genie, a second skill for asking Genie in another workspace, and an always-on rule that sends data questions to Genie.
 
 ## Requirements
 
@@ -65,6 +66,17 @@ Each of these works on its own in a new chat:
 
 In chat, `/antigravity-databricks-genie` loads the skill directly.
 
+## Ask in another workspace
+
+Your default Databricks CLI profile stays as it is, and you can still ask Genie in another workspace:
+
+- **For one question, or part of one:** name the workspace or the profile in the question, as in "In profile B, …" or "… and in my sales workspace". Only that part goes there; the rest, and later questions, go to your default.
+- **For the rest of a chat:** say "use workspace B from now on", and every question in that chat goes there until you say "back to my default". Other chats and new sessions start on your default.
+- **Picking the profile:** the agent lists your Databricks CLI profiles and their hosts, and asks you whenever more than one could match or none does. It never picks one for you. For a workspace with no profile yet, it offers to set one up under a name you pick, with the same browser sign-in as first use.
+- **Questions that span workspaces:** the agent asks each workspace's Genie its own part, then combines the answers and says which numbers came from where.
+
+Before each question the agent still says "Asking Genie in <host> (Databricks CLI profile <profile>)", so you can see where each part goes, and follow-ups stay in the workspace where the conversation started. As with the default, only profiles that sign in with OAuth U2M work.
+
 ## Use another Databricks CLI profile
 
 Set `DATABRICKS_CONFIG_PROFILE` to the profile's name in the environment Antigravity starts from:
@@ -114,7 +126,7 @@ Leave `genie_setup` out. It sets up a Databricks CLI profile and opens a browser
 - **Sign-in:** today the plugin signs in with your own Databricks CLI OAuth U2M login, so Genie runs under your permissions and sees only what you can see. Service principal sign-in (OAuth M2M) is planned as an opt-in path ([#39](https://github.com/datasciencemonkey/antigravity-bricks-plugin/issues/39)). A Databricks CLI profile that signs in any other way gets a clear `unsupported_auth` message, and one that the CLI doesn't list but that has settings in the Databricks config file gets `profile_exists_unreadable`; the plugin never changes either.
 - **No secrets stored:** Antigravity and the plugin store no secrets. There is nothing to fill in, no token in Antigravity's settings, and no password or key in the plugin. The Databricks CLI keeps your sign-in in its own local cache and hands out short-lived tokens (about an hour).
 - **Tokens are never printed,** logged or written to disk by the plugin, and the agent is told never to show one.
-- **Where your token goes:** only to the workspace of the Databricks CLI profile the plugin uses. The plugin never takes a workspace from your environment, so an exported `DATABRICKS_HOST` can't make it call, or send a token to, another host.
+- **Where your token goes:** only to the workspace of the Databricks CLI profile the plugin uses. The plugin never takes a workspace from your environment, so an exported `DATABRICKS_HOST` can't make it call, or send a token to, another host. When you ask in another workspace, that profile's token goes only to that profile's own workspace.
 - **One small file:** the only file the plugin itself writes is a short record of a sign-in it started: a process id, the profile, the workspace and the start time, never a token. It's in `~/.cache/antigravity-databricks-genie/`, a folder only you can use, so the next headless `agy -p` run can see that sign-in.
 - **Where your data goes:** questions go from your computer to Genie in your own Databricks workspace, and the plugin has no server of its own. Genie's answers come back into your Antigravity conversation, so treat them like anything else you share with Antigravity.
 
@@ -133,7 +145,7 @@ Leave `genie_setup` out. It sets up a Databricks CLI profile and opens a browser
 
 ## What's in this repo
 
-To use the plugin you need only the install URL (see [Install](#install)). The plugin itself is [`plugins/databricks-genie/`](plugins/databricks-genie): a manifest, the bridge script, the skill, the rule and the logo. Everything else is for developing it:
+To use the plugin you need only the install URL (see [Install](#install)). The plugin itself is [`plugins/databricks-genie/`](plugins/databricks-genie): a manifest, the bridge script, the skill, the rule and the logo, plus a second skill for asking Genie in another workspace. Everything else is for developing it:
 
 - `tests/` and `tools/` hold the test suite and the repo checks, and `scripts/hooks/` the pre-push gate. `.github/workflows/` runs the suite in CI.
 - `pyproject.toml` and `uv.lock` pin what the suite needs.
