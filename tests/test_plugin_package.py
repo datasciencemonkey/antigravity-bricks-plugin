@@ -13,6 +13,7 @@ import yaml
 REPO = Path(__file__).resolve().parent.parent
 PLUGIN = REPO / "plugins" / "databricks-genie"
 SKILL = "antigravity-databricks-genie"
+PROFILE_SKILL = "select-databricks-profile"  # asks Genie in another workspace for part of a question (#49)
 GENIE_ONE_TOOLS = ["genie_ask", "genie_poll_response", "genie_get_query_result", "genie_cancel_response"]
 STATUSES = ["ready", "not_configured", "login_needed", "login_in_progress", "login_failed", "cli_missing",
             "unsupported_auth", "profile_exists_unreadable"]
@@ -140,10 +141,10 @@ def test_skills_have_frontmatter_the_loader_accepts():
         assert 1 <= len(front["description"]) <= 1024
 
 
-def test_the_plugin_ships_exactly_one_skill_and_it_is_antigravity_databricks_genie():
-    folders = [path.name for path in (PLUGIN / "skills").iterdir() if path.is_dir()]
+def test_the_plugin_ships_exactly_its_own_skills_antigravity_databricks_genie_and_select_databricks_profile():
+    folders = sorted(path.name for path in (PLUGIN / "skills").iterdir() if path.is_dir())
 
-    assert folders == [SKILL]
+    assert folders == sorted([SKILL, PROFILE_SKILL]), "the plugin ships only its own skills, never Databricks' published ones"
 
 
 def test_the_skill_is_named_antigravity_databricks_genie_so_its_slash_command_is_too():
@@ -383,3 +384,115 @@ def test_genie_connections_own_description_names_every_status_it_can_report():
     (tool,) = [tool for tool in bridge.BRIDGE_TOOLS if tool["name"] == "genie_connection"]
 
     assert [status for status in STATUSES if status not in tool["description"]] == []
+
+
+# The select-databricks-profile skill (#49): ask Genie in another workspace for part of a question, and keep the default.
+
+
+def profile_skill_text():
+    return (PLUGIN / "skills" / PROFILE_SKILL / "SKILL.md").read_text()
+
+
+def profile_skill_section(title):
+    """The body of the skill's `## title` section."""
+    match = re.search(rf"^## {re.escape(title)}\n(.*?)(?=^## |\Z)", profile_skill_text(), re.MULTILINE | re.DOTALL)
+    assert match, f"the {PROFILE_SKILL} skill has no '## {title}' section"
+    return " ".join(match.group(1).split())  # one line, so a phrase can be found whatever its line breaks
+
+
+def test_the_profile_skill_is_named_for_its_slash_command_and_says_when_to_use_it():
+    front = frontmatter(PLUGIN / "skills" / PROFILE_SKILL / "SKILL.md")
+
+    assert front["name"] == PROFILE_SKILL
+    for words in ("another Databricks workspace", "Databricks CLI profile", "without changing the default", "from now on"):
+        assert words in front["description"], words
+
+
+def test_the_profile_skill_names_the_server_and_the_tools_that_take_a_profile():
+    text = profile_skill_text()
+
+    assert f"{manifest()['name']}_{next(iter(mcp_config()['mcpServers']))}" in text
+    for tool in GENIE_ONE_TOOLS + ["genie_connection", "genie_setup"]:
+        assert f"`{tool}`" in text, tool
+
+
+def test_the_profile_skill_says_the_default_never_changes():
+    section = profile_skill_section("The default never changes")
+
+    for words in ("`DEFAULT`", "the one Antigravity was started with", "Nothing in this skill changes it",
+                  "a question that names no workspace goes there"):
+        assert words in section, words
+
+
+def test_a_workspace_named_on_one_question_applies_only_to_that_part_of_that_question():
+    section = profile_skill_section("A workspace named for one question")
+
+    for words in ("in profile B", "in my sales workspace", "only that part goes there",
+                  "The rest of the question, and every later one, goes to the default"):
+        assert words in section, words
+
+
+def test_a_workspace_the_user_picks_from_now_on_is_used_for_the_rest_of_the_chat_until_they_switch_back():
+    section = profile_skill_section("A workspace to use from now on")
+
+    for words in ("use workspace B from now on", "switch to B", "pass that profile on every Genie call for the rest of this chat",
+                  "back to my default", "use DEFAULT", "leave `profile` out again",
+                  "not the default profile itself, not other chats, and not new sessions",
+                  "The workspace line still comes before every question",
+                  "Without \"from now on\", a workspace named on one question applies only to that question"):
+        assert words in section, words
+
+
+def test_the_profile_skill_matches_a_profile_from_genie_connection_and_asks_when_that_is_not_clear():
+    section = profile_skill_section("Find the profile")
+
+    for words in ("`profiles`", "`name`, `host` and `auth_type`", "only when exactly one matches",
+                  "When more than one could match, or none does, ask the user which one they mean",
+                  "Never pick a profile on your own", "`databricks-cli`", "OAuth U2M", "follow its `next_step`"):
+        assert words in section, words
+
+
+def test_the_profile_skill_offers_to_set_up_a_workspace_with_no_profile_under_a_name_the_user_picks():
+    section = profile_skill_section("A workspace with no profile yet")
+
+    for words in ("offer to set one up", "never guess one", "pick a name for the new profile", "browser window",
+                  "`genie_setup` with `workspace_url` and `profile` set to the name they picked",
+                  "never changes a profile that already exists"):
+        assert words in section, words
+
+
+def test_the_profile_skill_splits_a_mixed_question_and_says_which_numbers_came_from_where():
+    section = profile_skill_section("A question that spans workspaces")
+
+    steps = ["Split it into one question per workspace", "Rewrite each part for the workspace that holds its data",
+             "Ask each part in its own workspace", "Combine the answers",
+             "say which numbers came from which workspace and Databricks CLI profile"]
+    assert [section.index(step) for step in steps] == sorted(section.index(step) for step in steps)
+
+
+def test_the_profile_skill_says_where_each_question_goes_before_it_asks():
+    section = profile_skill_section("Before each question")
+
+    assert "Before each `genie_ask`" in section and WORKSPACE_LINE in section
+
+
+def test_the_profile_skill_passes_the_same_profile_on_every_call_of_a_conversation_on_every_turn():
+    # The bridge remembers a conversation's profile only while it runs, and `agy -p` starts a new bridge each turn.
+    section = profile_skill_section("Follow-ups and polls")
+
+    for words in ("A conversation stays in the workspace where it started", "Pass the same `profile` on every call in it",
+                  "on every turn", "`genie_poll_response`", "follow-up", "only while it runs",
+                  "`agy -p` run starts a new bridge each turn"):
+        assert words in section, words
+
+
+def test_the_profile_skill_says_databricks_cli_profile_so_nobody_reads_it_as_an_agy_setting():
+    assert re.findall(r"(?<!Databricks )CLI profile", profile_skill_text()) == []
+
+
+def test_the_genie_skill_and_the_rule_each_point_at_the_profile_skill_once():
+    for document in (f"skills/{SKILL}/SKILL.md", "rules/AGENTS.md"):
+        (line,) = [line for line in (PLUGIN / document).read_text().splitlines() if f"`{PROFILE_SKILL}`" in line]
+
+        assert "another workspace" in line and "from now on" in line, document
+        assert "default" in line and "never changes" in line, document

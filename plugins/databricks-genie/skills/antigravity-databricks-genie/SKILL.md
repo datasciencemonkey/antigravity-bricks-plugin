@@ -9,6 +9,8 @@ Genie answers questions about the user's Databricks data. It finds the right tab
 
 In Antigravity these tools are on the MCP server `databricks-genie_genie`. Call them with `call_mcp_tool`, passing that server name, the tool name, and the arguments below. Their arguments are all listed here, so there's no need to look up their schemas first.
 
+To ask in another workspace, for a question, part of one, or from now on, follow the `select-databricks-profile` skill. It passes that workspace's Databricks CLI profile as `profile`, and the default profile never changes.
+
 ## Check the connection first
 
 Call `genie_connection` (no arguments) once per conversation, before the first question. It returns the `status`, the Databricks CLI `profile`, the workspace `host` Genie will use, and a `next_step`. By status:
