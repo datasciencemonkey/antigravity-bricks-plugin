@@ -681,6 +681,8 @@ def connection(context):
     """Where the connection stands: checks the CLI profile, and any background sign-in, even one an earlier bridge began."""
     cli = context["cli"]
     login = login_record(context)
+    # Before the token check: a sign-in that ends while the token is checked is still in progress, not one that failed.
+    running = login is not None and login_running(context, login)
     try:
         cli.token()
     except OutOfTime:
@@ -690,7 +692,7 @@ def connection(context):
         return report(context, "cli_missing")
     except BridgeError:
         context["ready"] = False
-        if login is not None and login_running(context, login):
+        if running:
             return report(context, "login_in_progress", login["host"])
         profiles = cli.profiles()
         own = next((item for item in profiles if item["name"] == cli.profile), None)

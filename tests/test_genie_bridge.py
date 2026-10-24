@@ -128,11 +128,14 @@ def genie():
 # $FAKE_TOKENS in order. FAKE_CLI_FAIL makes `auth token` fail as an expired sign-in does, FAKE_PROFILES_FAIL breaks
 # `auth profiles`, FAKE_LOGIN_SECONDS and FAKE_LOGIN_FAIL shape `auth login`, and FAKE_CLI_CONFIG names a config file to read
 # instead of the one in DATABRICKS_CONFIG_FILE, as the real CLI does on Windows, where it looks under USERPROFILE, wherever
-# HOME points.
+# HOME points. FAKE_LOGIN_ENDS_DURING_TOKEN makes a sign-in end at the worst moment, every time: `auth login` writes its
+# process id to $FAKE_CLI_CALLS.login-pid and waits until `auth token` has found no profile, and that `auth token` fails only
+# once the sign-in has ended.
 FAKE_CLI = r"""#!/bin/sh
 echo "$@" >> "$FAKE_CLI_CALLS"
 env | sed -n 's/^\(DATABRICKS_[A-Za-z0-9_]*\)=.*/\1/p' >> "$FAKE_CLI_CALLS.env"
 fail() { echo "Error: $*" >&2; exit 1; }
+wait_until() { n=0; until eval "$1"; do n=$((n + 1)); [ $n -lt 1000 ] || fail "timed out waiting for: $1"; sleep 0.01; done; }
 config="${FAKE_CLI_CONFIG:-${DATABRICKS_CONFIG_FILE:-~/.databrickscfg}}"
 case "$config" in "~"*) config="$HOME${config#"~"}" ;; esac
 need_config() { [ -f "$config" ] || fail "cannot parse config file: no configuration file found at $config; please create one by running 'databricks auth login'"; }
@@ -203,6 +206,10 @@ case "$command" in
   echo "Opening the browser to sign in"  # output that must never reach the MCP stream
   echo "Waiting for the browser" >&2
   sleep "${FAKE_LOGIN_SECONDS:-0}"
+  if [ -n "$FAKE_LOGIN_ENDS_DURING_TOKEN" ]; then
+    echo $$ > "$FAKE_CLI_CALLS.login-pid"
+    wait_until '[ -f "$FAKE_CLI_CALLS.token-read" ]'
+  fi
   [ -z "$FAKE_LOGIN_FAIL" ] || fail "the sign-in was cancelled"
   if [ -f "$config" ]; then
     awk -v target="$profile" '
@@ -220,7 +227,14 @@ case "$command" in
 "auth token")
   [ -n "$profile" ] && [ "$output" = json ] && [ -z "$host$timeout$skip" ] || fail "unexpected flags for $command"
   need_config
-  [ -n "$(field "$profile" host)" ] || fail "has no $profile profile configured"
+  if [ -z "$(field "$profile" host)" ]; then
+    if [ -n "$FAKE_LOGIN_ENDS_DURING_TOKEN" ] && [ -f "$FAKE_CLI_CALLS.login-pid" ] && [ ! -f "$FAKE_CLI_CALLS.token-read" ]; then
+      touch "$FAKE_CLI_CALLS.token-read"  # the sign-in may write the profile and end now, after this read
+      pid=$(cat "$FAKE_CLI_CALLS.login-pid")
+      wait_until 'case "$(ps -o stat= -p "$pid" 2>/dev/null)" in ""|*Z*) true ;; *) false ;; esac'  # ended, or gone
+    fi
+    fail "has no $profile profile configured"
+  fi
   [ "$(field "$profile" auth_type)" = databricks-cli ] || fail "auth token only works with U2M (databricks-cli) profiles"
   [ -z "$FAKE_CLI_FAIL" ] || fail "refresh token is invalid"
   echo >> "$FAKE_CLI_CALLS.tokens"
@@ -2873,3 +2887,22 @@ def test_genie_setup_offers_an_optional_profile_for_a_new_one(start, cli):
     assert setup["inputSchema"]["properties"]["profile"]["type"] == "string"
     assert "name the user" in setup["inputSchema"]["properties"]["profile"]["description"]
     assert setup["inputSchema"]["required"] == ["workspace_url"]
+
+
+# A sign-in that ends while genie_connection is checking it (#33): the token check finds no profile yet, and by the time the
+# bridge looks at the sign-in it has ended. That is a sign-in still in progress, not a failed one.
+
+
+def test_a_sign_in_that_ends_while_genie_connection_checks_it_is_in_progress_then_ready_and_never_failed(start, cli):
+    # The stand-in makes the sign-in end at that moment every time; in a real first use it comes up now and then.
+    cli.set_profiles({})
+    bridge = start(DATABRICKS_CONFIG_PROFILE="NEW", FAKE_LOGIN_ENDS_DURING_TOKEN="1")
+    started = start_sign_in(bridge)
+    wait_for(lambda: cli.log.with_name(cli.log.name + ".login-pid").exists())
+    _, during = bridge.connection(4)
+    _, after = bridge.connection(5)
+
+    assert started["status"] == "login_in_progress"
+    assert f"[NEW]\nhost = {WORKSPACE}\nauth_type = databricks-cli\n" in cli.config.read_text()  # the sign-in worked
+    assert during["status"] == "login_in_progress"
+    assert after["status"] == "ready" and cli.login_records() == []
