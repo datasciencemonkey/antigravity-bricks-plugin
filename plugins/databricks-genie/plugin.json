@@ -2,7 +2,7 @@
   "name": "databricks-genie",
   "displayName": "Databricks Genie",
   "description": "Ask Databricks Genie about your governed data from Antigravity and turn its answers and SQL into code. Signs in with your Databricks CLI.",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "author": {
     "name": "Sathish Gangichetty",
     "url": "https://github.com/datasciencemonkey"
