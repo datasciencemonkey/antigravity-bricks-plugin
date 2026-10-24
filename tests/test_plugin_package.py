@@ -457,8 +457,10 @@ def test_the_profile_skill_offers_to_set_up_a_workspace_with_no_profile_under_a_
 
     for words in ("offer to set one up", "never guess one", "pick a name for the new profile", "browser window",
                   "`genie_setup` with `workspace_url` and `profile` set to the name they picked",
-                  "never changes a profile that already exists"):
+                  "never points an existing profile at another workspace",
+                  "never touches a profile that signs in another way"):
         assert words in section, words
+    assert "never changes a profile that already exists" not in section  # it signs an expired U2M profile in again
 
 
 def test_the_profile_skill_splits_a_mixed_question_and_says_which_numbers_came_from_where():

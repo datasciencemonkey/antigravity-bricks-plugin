@@ -28,7 +28,7 @@ When the user says to use a workspace or a profile from now on ("use workspace B
 
 ## A workspace with no profile yet
 
-When no profile points to the workspace the user named, offer to set one up. Ask for its workspace URL, such as `https://<workspace>.cloud.databricks.com`, and never guess one, and ask the user to pick a name for the new profile. Tell them a browser window will open for them to sign in, as on first use. Then call `genie_setup` with `workspace_url` and `profile` set to the name they picked, and follow the sign-in with `genie_connection` and the same `profile`. `genie_setup` never changes a profile that already exists.
+When no profile points to the workspace the user named, offer to set one up. Ask for its workspace URL, such as `https://<workspace>.cloud.databricks.com`, and never guess one, and ask the user to pick a name for the new profile. Tell them a browser window will open for them to sign in, as on first use. Then call `genie_setup` with `workspace_url` and `profile` set to the name they picked, and follow the sign-in with `genie_connection` and the same `profile`. `genie_setup` never points an existing profile at another workspace, and never touches a profile that signs in another way; it only signs an existing OAuth U2M profile in again when its sign-in has expired.
 
 ## A question that spans workspaces
 
