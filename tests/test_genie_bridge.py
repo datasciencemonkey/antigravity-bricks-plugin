@@ -2110,3 +2110,260 @@ def test_the_config_file_is_under_userprofile_on_windows_where_the_cli_looks_and
     assert default == os.path.join("/windows/profile", ".databrickscfg")
     assert tilde == os.path.join("/windows/profile", "custom.cfg")
     assert bridge.config_file(env) == os.path.join("/git-bash/home", ".databrickscfg")
+
+
+# Pinned before #49, on version 0.3.2: what each call that names no Databricks CLI profile returns, end to end through the
+# stand-in CLI and the fake Genie, on the path a real install takes (the profile's own host, no GENIE_MCP_URL). Naming a profile
+# is an addition, so these stay exactly as they are. The only differences allowed are the optional profile property in a tool's
+# input schema and the profiles list genie_connection returns with every report.
+
+
+PINNED_INSTRUCTIONS = (
+    "Databricks Genie answers questions about the user's data in their Databricks workspace. Call genie_connection once per "
+    "conversation before the first question, and follow its next_step. Before each genie_ask, tell the user \"Asking Genie in "
+    "<host> (Databricks CLI profile <profile>)\". Use genie_ask to start a question and genie_poll_response to get the answer. "
+    "Never pick a workspace URL or a Databricks CLI profile for the user."
+)
+PINNED_SIGN_IN = (
+    "Genie signs in through the Databricks CLI, the safest way to run OAuth U2M (user-to-machine) sign-in from their own machine: "
+    "they sign in in their browser with their usual single sign-on and MFA and never create or paste a token, and the CLI hands "
+    "out short-lived tokens from its own local cache."
+)
+PINNED_INSTALLERS = (
+    "on a Mac with Homebrew, `brew install databricks/tap/databricks`; on macOS or Linux without Homebrew, "
+    "`curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh`; on Windows, "
+    "`winget install Databricks.DatabricksCLI`"
+)
+PINNED_SEPARATE_PROFILE = ("set DATABRICKS_CONFIG_PROFILE to a new profile name, restart Antigravity, and give you the workspace URL "
+                           "for genie_setup. Never change this profile for them.")
+PINNED_BRIDGE_TOOLS = [
+    {
+        "name": "genie_connection",
+        "description": (
+            "Check the Databricks connection Genie uses. Call it once per conversation before the first genie_ask, and again "
+            "to follow a sign-in that genie_setup started. Returns JSON: status (ready, not_configured, login_needed, "
+            "login_in_progress, login_failed, unsupported_auth, profile_exists_unreadable or cli_missing), the Databricks CLI "
+            "profile, the workspace host, and next_step, which says what to do. When the profile isn't set up, it also lists "
+            "the Databricks CLI's other profiles."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "genie_setup",
+        "description": (
+            "Set up the Databricks CLI profile Genie uses. Starts `databricks auth login` for the workspace, which opens a "
+            "browser window for the user to sign in, and returns at once; then call genie_connection to follow the sign-in. "
+            "Pass the workspace URL the user gave you, and never guess one. It never points an existing profile at another "
+            "workspace: when a profile's sign-in has expired, pass its own workspace URL."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "workspace_url": {
+                    "type": "string",
+                    "description": "The user's Databricks workspace URL, such as https://<workspace>.cloud.databricks.com",
+                },
+            },
+            "required": ["workspace_url"],
+        },
+    },
+]
+
+
+def without_profile_properties(tools):
+    """A copy of tools/list's tools without the optional profile property, the one thing #49 adds to their schemas."""
+    copied = json.loads(json.dumps(tools))
+    for tool in copied:
+        tool["inputSchema"].get("properties", {}).pop("profile", None)
+    return copied
+
+
+def as_pinned(report, pinned):
+    """report without the profiles list that genie_connection adds to every report since #49, unless the pinned report had one."""
+    return {key: value for key, value in report.items() if key != "profiles" or "profiles" in pinned}
+
+
+def pinned_not_configured_step(profile, others):
+    step = (f"Databricks CLI profile {profile} isn't set up yet. Ask the user for their Databricks workspace URL, such as "
+            f"https://<workspace>.cloud.databricks.com, and never guess one. Explain that {PINNED_SIGN_IN} A browser window will "
+            "open for them to sign in. Then call genie_setup with the URL they give.")
+    if others:
+        step += (" The Databricks CLI has other profiles, listed in profiles. If the user would rather use one of them, they can "
+                 "set DATABRICKS_CONFIG_PROFILE to its name and restart Antigravity. Only profiles with auth_type databricks-cli "
+                 "(OAuth U2M) work here, and never pick one for them.")
+    return step
+
+
+def test_pinned_initialize(start, genie):
+    bridge = start()
+    bridge.send(INITIALIZE)
+    result = bridge.reply()["result"]
+
+    assert {**result, "serverInfo": {**result["serverInfo"], "version": "any"}} == {
+        "protocolVersion": "2025-06-18", "capabilities": {"tools": {"listChanged": True}},
+        "serverInfo": {"name": "databricks-genie-bridge", "version": "any"}, "instructions": PINNED_INSTRUCTIONS}
+
+
+def test_pinned_tools_list_before_and_after_the_profile_is_ready(start, genie, cli):
+    cli.set_profiles({})
+    first_use = start(DATABRICKS_CONFIG_PROFILE="NEW", GENIE_MCP_URL="")
+    first_use.send(TOOLS_LIST)
+    bundled = first_use.reply()["result"]["tools"]
+    live = [{"name": "genie_ask", "description": "Genie One's live description",
+             "inputSchema": {"type": "object", "properties": {"question": {"type": "string"}}, "required": ["question"]}}]
+    genie.reply = lambda request: (200, JSON, json.dumps({"jsonrpc": "2.0", "id": request["body"].get("id"),
+                                                          "result": {"tools": live}}))
+    cli.set_profiles({"DEMO": genie.base})
+    ready = start(GENIE_MCP_URL="")
+    ready.send(TOOLS_LIST)
+    connected = ready.reply()["result"]["tools"]
+
+    assert without_profile_properties(bundled) == json.loads((BRIDGE.parent / "genie_tools.json").read_text()) + PINNED_BRIDGE_TOOLS
+    assert without_profile_properties(connected) == live + PINNED_BRIDGE_TOOLS
+
+
+def test_pinned_genie_ask_follow_up_and_poll(start, genie, cli):
+    def reply(request):
+        body = request["body"]
+        if body.get("method") != "tools/call":
+            return 200, {**JSON, "Mcp-Session-Id": "session-1"}, json.dumps({"jsonrpc": "2.0", "id": body.get("id"), "result": {}})
+        status = "completed" if body["params"]["name"] == "genie_poll_response" else "in_progress"
+        return 200, JSON, json.dumps({"jsonrpc": "2.0", "id": body["id"], "result": {
+            "content": [{"type": "text", "text": f"status: {status}"}],
+            "structuredContent": {"conversation_id": "c-1", "response_id": "r-1", "status": status}}})
+
+    genie.reply = reply
+    cli.set_profiles({"DEMO": genie.base})
+    bridge = start(GENIE_MCP_URL="")
+    bridge.send(INITIALIZE)
+    bridge.reply()
+    bridge.send(INITIALIZED)
+    sent = [call("genie_ask", {"question": "Revenue last quarter?"}, number=3),
+            call("genie_ask", {"question": "By region?", "conversation_id": "c-1"}, number=4),
+            call("genie_poll_response", POLL, number=5)]
+    replies = []
+    for message in sent:
+        bridge.send(message)
+        replies.append(bridge.reply())
+
+    line = {"type": "text", "text": f"Asked Genie in {genie.host} (Databricks CLI profile DEMO)"}
+    asked = {"content": [{"type": "text", "text": "status: in_progress"}, line],
+             "structuredContent": {"conversation_id": "c-1", "response_id": "r-1", "status": "in_progress"}}
+    assert replies == [
+        {"jsonrpc": "2.0", "id": 3, "result": asked},
+        {"jsonrpc": "2.0", "id": 4, "result": asked},
+        {"jsonrpc": "2.0", "id": 5, "result": {
+            "content": [{"type": "text", "text": "status: completed"}],
+            "structuredContent": {"conversation_id": "c-1", "response_id": "r-1", "status": "completed"}}},
+    ]
+    assert genie.methods() == ["initialize", "notifications/initialized", "tools/call", "tools/call", "tools/call"]
+    assert [request["body"] for request in genie.requests[2:]] == sent  # just what the agent sent, nothing added or taken out
+    assert {request["path"] for request in genie.requests} == {GENIE_ONE_PATH}
+    assert {request["headers"]["authorization"] for request in genie.requests} == {"Bearer tok-1"}
+    assert [request["headers"].get("mcp-session-id") for request in genie.requests] == [None] + ["session-1"] * 4
+    assert cli_calls(cli) == ["auth token --profile DEMO --output json", "auth profiles --skip-validate --output json"]
+
+
+@pytest.mark.parametrize("status", ["ready", "not_configured", "not_configured, no profiles at all", "login_needed",
+                                    "unsupported_auth", "profile_exists_unreadable", "cli_missing"])
+def test_pinned_genie_connection_reports(start, genie, cli, tmp_path, status):
+    env = {"GENIE_MCP_URL": ""}
+    host = WORKSPACE.split("//")[1]
+    if status == "ready":
+        cli.set_profiles({"DEMO": genie.base})
+        pinned = {"status": "ready", "profile": "DEMO", "host": genie.host,
+                  "next_step": f"Before each genie_ask, tell the user \"Asking Genie in {genie.host} (Databricks CLI profile DEMO)\"."}
+    elif status == "not_configured":
+        cli.set_profiles({"dev": workspace("dev-workspace"), "DEFAULT": (WORKSPACE, "pat")})
+        env["DATABRICKS_CONFIG_PROFILE"] = "NEW"
+        pinned = {"status": "not_configured", "profile": "NEW", "host": None, "next_step": pinned_not_configured_step("NEW", True),
+                  "profiles": [{"name": "dev", "host": workspace("dev-workspace"), "auth_type": "databricks-cli"},
+                               {"name": "DEFAULT", "host": WORKSPACE, "auth_type": "pat"}]}
+    elif status.startswith("not_configured"):
+        cli.set_profiles({})
+        env["DATABRICKS_CONFIG_PROFILE"] = "NEW"
+        pinned = {"status": "not_configured", "profile": "NEW", "host": None, "next_step": pinned_not_configured_step("NEW", False),
+                  "profiles": []}
+    elif status == "login_needed":
+        env["FAKE_CLI_FAIL"] = "1"
+        pinned = {"status": "login_needed", "profile": "DEMO", "host": host, "next_step": (
+            f"The sign-in for Databricks CLI profile DEMO ({WORKSPACE}) has expired. Tell the user a browser window will open for "
+            f"them to sign in again, then call genie_setup with {WORKSPACE}.")}
+    elif status == "unsupported_auth":
+        cli.set_profiles({"DEMO": (WORKSPACE, "pat")})
+        pinned = {"status": "unsupported_auth", "profile": "DEMO", "host": host, "next_step": (
+            "Databricks CLI profile DEMO signs in with auth type pat, not OAuth U2M. Genie in Antigravity signs in with OAuth U2M "
+            "through the Databricks CLI, so it can't use this profile, and genie_setup won't change it. The user can set up a "
+            "separate U2M profile: " + PINNED_SEPARATE_PROFILE)}
+    elif status == "profile_exists_unreadable":
+        cli.set_config(azure_service_principal("NEW"))
+        env["DATABRICKS_CONFIG_PROFILE"] = "NEW"
+        pinned = {"status": "profile_exists_unreadable", "profile": "NEW", "host": None, "next_step": (
+            "Databricks CLI profile NEW has settings in the Databricks config file that `databricks auth profiles` doesn't list "
+            "(usually because it has no host, as with an Azure service principal that sets azure_workspace_resource_id), or that "
+            "file can't be read. Genie can't tell how the profile signs in, and signing it in again would rewrite it and drop its "
+            "secret, so genie_setup won't touch it. The user can set up a separate profile: " + PINNED_SEPARATE_PROFILE)}
+    else:
+        env["GENIE_BRIDGE_DATABRICKS_CLI"] = str(tmp_path / "no-such-databricks")
+        pinned = {"status": "cli_missing", "profile": "DEMO", "host": None, "next_step": (
+            "The Databricks CLI isn't installed. Offer to install it with Databricks' official installer, and run the installer "
+            "only after the user approves; never install it silently. When you ask, explain that " + PINNED_SIGN_IN +
+            " Official installers: " + PINNED_INSTALLERS + ". Then call genie_connection again.")}
+    bridge = start(**env)
+    _, report = bridge.connection(3)
+
+    assert as_pinned(report, pinned) == pinned
+    assert genie.requests == []
+
+
+def test_pinned_sign_in_in_progress_and_failed(start, cli):
+    in_progress = {"status": "login_in_progress", "profile": "NEW", "host": WORKSPACE.split("//")[1], "next_step": (
+        f"A browser window is open for the user to sign in to {WORKSPACE} (Databricks CLI profile NEW). Ask them to finish signing "
+        "in there, then call genie_connection again. A sign-in left unfinished gives up after 5 minutes.")}
+    failed = {**in_progress, "status": "login_failed", "next_step": (
+        f"The sign-in to {WORKSPACE} didn't finish: it was cancelled in the browser, timed out, or failed. Ask the user whether "
+        f"to try again, and if so call genie_setup with {WORKSPACE} again.")}
+    cli.set_profiles({})
+    bridge = start(GENIE_MCP_URL="", DATABRICKS_CONFIG_PROFILE="NEW", FAKE_LOGIN_SECONDS="1", FAKE_LOGIN_FAIL="1")
+    started = start_sign_in(bridge)
+    _, during = bridge.connection(4)
+    _, after = wait_for_sign_in_to_end(bridge)
+
+    assert started == in_progress
+    assert as_pinned(during, in_progress) == in_progress
+    assert as_pinned(after, failed) == failed
+
+
+def pinned_error(number, text):
+    return {"jsonrpc": "2.0", "id": number, "result": {"content": [{"type": "text", "text": text}], "isError": True}}
+
+
+def test_pinned_errors_from_genie_setup_and_from_a_question_before_setup(start, genie, cli):
+    other = workspace("other-workspace")
+    ready = start(GENIE_MCP_URL="")
+    ready.send(call("genie_setup", {"workspace_url": other}))
+    elsewhere = ready.reply()
+    ready.send(call("genie_setup", {"workspace_url": "http://intranet.example.test"}, number=4))
+    not_a_workspace = ready.reply()
+    cli.set_profiles({"DEMO": (WORKSPACE, "pat")})
+    pat = start(GENIE_MCP_URL="")
+    pat.send(call("genie_setup", {"workspace_url": WORKSPACE}))
+    refused = pat.reply()
+    cli.set_profiles({})
+    first_use = start(GENIE_MCP_URL="", DATABRICKS_CONFIG_PROFILE="NEW")
+    first_use.send(call("genie_ask", {"question": "Revenue last quarter?"}))
+    ask = first_use.reply()
+
+    assert elsewhere == pinned_error(3, (
+        f"Databricks CLI profile DEMO is already set up for {WORKSPACE}, and genie_setup never changes which workspace a profile "
+        f"points to. To use {other}, the user can set DATABRICKS_CONFIG_PROFILE to a new profile name and restart Antigravity."))
+    assert not_a_workspace == pinned_error(4, (
+        "genie_setup needs the https URL of a Databricks workspace, such as https://<workspace>.cloud.databricks.com, "
+        "https://adb-<id>.<n>.azuredatabricks.net or https://<id>.<n>.gcp.databricks.com. Ask the user for theirs, and never "
+        "guess one."))
+    assert refused == pinned_error(3, (
+        "Databricks CLI profile DEMO signs in with auth type pat, not OAuth U2M. Genie in Antigravity signs in with OAuth U2M "
+        "through the Databricks CLI, so it can't use this profile, and genie_setup won't change it. The user can set up a "
+        "separate U2M profile: " + PINNED_SEPARATE_PROFILE))
+    assert ask == pinned_error(3, "Genie isn't connected yet (not_configured). " + pinned_not_configured_step("NEW", False))
+    assert cli.logins() == [] and genie.requests == []
