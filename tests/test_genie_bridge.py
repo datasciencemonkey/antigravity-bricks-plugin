@@ -2684,3 +2684,192 @@ def test_genie_connection_still_answers_when_the_profiles_cannot_be_listed(start
     assert "isError" not in reply["result"], text_of(reply)
     assert report_of(reply)["status"] == ("ready" if why == "the CLI can't list them" else "cli_missing")
     assert "profiles" not in report_of(reply)
+
+
+# genie_setup takes a profile (#49): a new Databricks CLI profile for a workspace that has none yet, under a name the user picks,
+# with the same browser sign-in as first use and every guarantee the default has. The default profile is never touched.
+
+
+def named_connection(bridge, profile, number):
+    """Call genie_connection for profile; return the notifications written before its reply, and its report."""
+    bridge.send(call("genie_connection", {"profile": profile}, number=number))
+    notifications = []
+    while True:
+        message = bridge.reply()
+        if "id" not in message:
+            notifications.append(message)
+            continue
+        return notifications, report_of(message)
+
+
+def wait_for_named_sign_in_to_end(bridge, profile, first_number=100):
+    """Poll genie_connection for profile until its sign-in is over; return the notifications seen and the last report."""
+    seen = []
+    for number in range(first_number, first_number + 200):
+        notifications, report = named_connection(bridge, profile, number)
+        seen += notifications
+        if report["status"] != "login_in_progress":
+            return seen, report
+        time.sleep(0.05)
+    raise AssertionError("the sign-in never ended")
+
+
+def signed_in(cli, profile):
+    """Wait until the stand-in CLI's sign-in has written profile into the config file. A genie_connection after that finds it
+    signed in, whereas one that is still checking when the sign-in ends can report it once as login_failed."""
+    wait_for(lambda: f"[{profile}]\n" in cli.config.read_text())
+
+
+def test_genie_setup_sets_up_a_new_profile_under_the_name_the_user_picked_and_leaves_the_default_alone(start, genie, cli):
+    cli.set_profiles({"DEMO": genie.base})
+    default_section = f"[DEMO]\nhost = {genie.base}\nauth_type = databricks-cli\n"
+    bridge = start(GENIE_MCP_URL="", FAKE_LOGIN_SECONDS="1")
+    _, before = named_connection(bridge, "sales", 3)
+    bridge.send(call("genie_setup", {"workspace_url": WORKSPACE + "/browse?o=123", "profile": "sales"}, number=4))
+    started = report_of(bridge.reply())
+    (record,) = cli.login_records()
+    recorded = json.loads(record.read_text())
+    _, during = named_connection(bridge, "sales", 5)
+    signed_in(cli, "sales")
+    _, after = named_connection(bridge, "sales", 6)
+    _, default = bridge.connection(7)
+
+    assert before["status"] == "not_configured" and during["status"] == "login_in_progress"
+    for words in ("genie_setup", "profile", "workspace URL", "never guess", "browser", "OAuth U2M"):
+        assert words in before["next_step"], words
+    assert (started["status"], started["profile"]) == ("login_in_progress", "sales")
+    assert "genie_connection again with profile sales" in started["next_step"]
+    assert record.name == "databricks-genie-login-sales.json" and recorded["profile"] == "sales" and recorded["host"] == WORKSPACE
+    assert cli.logins() == [f"auth login --host {WORKSPACE} --profile sales --timeout 5m"]
+    assert f"[sales]\nhost = {WORKSPACE}\nauth_type = databricks-cli\n" in cli.config.read_text()
+    assert (after["status"], after["profile"], after["host"]) == ("ready", "sales", WORKSPACE.split("//")[1])
+    assert cli.login_records() == []
+    assert default_section in cli.config.read_text()  # the default profile, as it was
+    assert (default["status"], default["profile"], default["host"]) == ("ready", "DEMO", genie.host)
+    assert genie.requests == []
+
+
+def test_genie_setup_signs_a_named_profile_in_again_to_its_own_workspace_when_its_sign_in_expired(start, genie, cli):
+    b_workspace = workspace("b-workspace")
+    cli.set_profiles({"DEMO": genie.base, "B": b_workspace})
+    bridge = start(GENIE_MCP_URL="", FAKE_CLI_FAIL="1")
+    _, expired = named_connection(bridge, "B", 3)
+    bridge.send(call("genie_setup", {"workspace_url": b_workspace.upper() + "/sql/editor", "profile": "B"}, number=4))
+    report = report_of(bridge.reply())
+    wait_for(lambda: cli.logins())
+
+    assert expired["status"] == "login_needed" and f"genie_setup with {b_workspace} and profile B" in expired["next_step"]
+    assert report["status"] == "login_in_progress"
+    assert cli.logins() == [f"auth login --host {b_workspace} --profile B --timeout 5m"]
+
+
+def test_genie_setup_leaves_a_signed_in_named_profile_alone(start, genie, cli):
+    b_workspace = workspace("b-workspace")
+    cli.set_profiles({"DEMO": genie.base, "B": b_workspace})
+    bridge = start(GENIE_MCP_URL="")
+    bridge.send(call("genie_setup", {"workspace_url": b_workspace, "profile": "B"}))
+    report = report_of(bridge.reply())
+    time.sleep(0.3)
+
+    assert (report["status"], report["profile"]) == ("ready", "B")
+    assert cli.logins() == []
+
+
+@pytest.mark.parametrize("expired", [False, True])
+def test_genie_setup_never_points_a_named_profile_at_another_workspace(start, genie, cli, expired):
+    cli.set_profiles({"DEMO": genie.base, "B": workspace("b-workspace")})
+    before = cli.config.read_text()
+    bridge = start(GENIE_MCP_URL="", **({"FAKE_CLI_FAIL": "1"} if expired else {}))
+    bridge.send(call("genie_setup", {"workspace_url": workspace("other-workspace"), "profile": "B"}))
+    reply = bridge.reply()
+    time.sleep(0.3)
+
+    assert reply["result"]["isError"] is True
+    assert "never changes" in text_of(reply) and "new profile name" in text_of(reply)
+    assert "DATABRICKS_CONFIG_PROFILE" not in text_of(reply)
+    assert cli.logins() == [] and cli.config.read_text() == before
+
+
+@pytest.mark.parametrize("kind", ["signs in another way", "hidden from the CLI"])
+def test_genie_setup_never_signs_in_over_a_named_profile_that_has_settings_of_its_own(start, genie, cli, kind):
+    # `auth login` would rewrite the section and drop its token or client secret.
+    if kind == "signs in another way":
+        cli.set_profiles({"DEMO": genie.base}, extra=f"[X]\nhost = {WORKSPACE}\nauth_type = pat\ntoken = {SECRET}\n")
+    else:
+        cli.set_profiles({"DEMO": genie.base}, extra=azure_service_principal("X"))
+    before = cli.config.read_text()
+    bridge = start(GENIE_MCP_URL="")
+    _, report = named_connection(bridge, "X", 3)
+    bridge.send(call("genie_setup", {"workspace_url": WORKSPACE, "profile": "X"}, number=4))
+    reply = bridge.reply()
+    time.sleep(0.3)
+
+    assert reply["result"]["isError"] is True and "DATABRICKS_CONFIG_PROFILE" not in text_of(reply)
+    assert "genie_setup with" in report["next_step"] and "name they pick" in report["next_step"]  # a separate profile, a new name
+    assert cli.logins() == [] and cli.config.read_text() == before and SECRET in cli.config.read_text()
+
+
+@pytest.mark.parametrize("url", ["https://accounts.cloud.databricks.com", "http://intranet.example.test", ""])
+def test_genie_setup_with_a_profile_refuses_a_url_that_is_not_a_databricks_workspace(start, genie, cli, url):
+    cli.set_profiles({"DEMO": genie.base})
+    bridge = start(GENIE_MCP_URL="")
+    bridge.send(call("genie_setup", {"workspace_url": url, "profile": "sales"}))
+    reply = bridge.reply()
+    time.sleep(0.3)
+
+    assert reply["result"]["isError"] is True and "never guess" in text_of(reply)
+    assert cli.logins() == []
+
+
+@pytest.mark.parametrize("profile", ["-x", "two words", "a]b", "x" * 65, 42])
+def test_genie_setup_refuses_a_profile_name_the_cli_config_cannot_safely_hold_before_the_cli_sees_it(start, cli, profile):
+    bridge = start()
+    bridge.send(call("genie_setup", {"workspace_url": WORKSPACE, "profile": profile}))
+    reply = bridge.reply()
+    time.sleep(0.3)
+
+    assert reply["result"]["isError"] is True and "never pick" in text_of(reply)
+    assert cli.calls() == []
+
+
+def test_a_failed_sign_in_for_a_named_profile_says_to_try_genie_setup_again_with_that_profile(start, genie, cli):
+    cli.set_profiles({"DEMO": genie.base})
+    bridge = start(GENIE_MCP_URL="", FAKE_LOGIN_FAIL="1")
+    bridge.send(call("genie_setup", {"workspace_url": WORKSPACE, "profile": "sales"}))
+    bridge.reply()
+    _, report = wait_for_named_sign_in_to_end(bridge, "sales")
+
+    assert (report["status"], report["profile"]) == ("login_failed", "sales")
+    assert f"genie_setup with {WORKSPACE} and profile sales again" in report["next_step"]
+
+
+def test_a_restarted_bridge_still_sees_a_named_profiles_sign_in_and_starts_no_second_one(start, genie, cli):
+    # `agy -p` starts a new bridge for each turn, while the user may still be signing in from the last one.
+    cli.set_profiles({"DEMO": genie.base})
+    first = start(new_session=True, GENIE_MCP_URL="", FAKE_LOGIN_SECONDS="3")
+    first.send(call("genie_setup", {"workspace_url": WORKSPACE, "profile": "sales"}))
+    first.reply()
+    wait_for(lambda: cli.logins())
+    os.killpg(first.process.pid, signal.SIGTERM)
+    first.process.wait(timeout=10)
+    second = start(GENIE_MCP_URL="")
+    _, during = named_connection(second, "sales", 3)
+    second.send(call("genie_setup", {"workspace_url": WORKSPACE, "profile": "sales"}, number=4))
+    again = report_of(second.reply())
+    signed_in(cli, "sales")
+    _, after = named_connection(second, "sales", 5)
+
+    assert during["status"] == "login_in_progress" and again["status"] == "login_in_progress"
+    assert len(cli.logins()) == 1
+    assert after["status"] == "ready"
+
+
+def test_genie_setup_offers_an_optional_profile_for_a_new_one(start, cli):
+    cli.set_profiles({})
+    bridge = start(DATABRICKS_CONFIG_PROFILE="NEW")
+    bridge.send(TOOLS_LIST)
+    (setup,) = [tool for tool in bridge.reply()["result"]["tools"] if tool["name"] == "genie_setup"]
+
+    assert setup["inputSchema"]["properties"]["profile"]["type"] == "string"
+    assert "name the user" in setup["inputSchema"]["properties"]["profile"]["description"]
+    assert setup["inputSchema"]["required"] == ["workspace_url"]

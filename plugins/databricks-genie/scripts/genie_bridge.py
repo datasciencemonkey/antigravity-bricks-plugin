@@ -86,6 +86,12 @@ BRIDGE_TOOLS = [
                     "type": "string",
                     "description": "The user's Databricks workspace URL, such as https://<workspace>.cloud.databricks.com",
                 },
+                "profile": {
+                    "type": "string",
+                    "description": ("Optional. The Databricks CLI profile to set up when it isn't the default: a new one, under a "
+                                    "name the user picked, for a workspace that has no profile yet, or one of theirs whose sign-in "
+                                    "has expired. Leave it out to set up the default profile."),
+                },
             },
             "required": ["workspace_url"],
         },
@@ -625,28 +631,33 @@ def named_next_step(status, profile, host, url, profiles, auth_type=None):
     if status == "ready":
         return ("Before each genie_ask, tell the user \"Asking Genie in {0} (Databricks CLI profile {1})\", and pass profile {1} on "
                 "every Genie call for this part of the question, follow-ups and polls included.".format(host, profile))
+    separate = ("Ask the user which other Databricks CLI profile to use, or offer to set up a new {}profile for that workspace under "
+                "a name they pick: call genie_setup with its workspace URL and that name as profile. Never change this one for them.")
     if status == "not_configured":
-        return ("Databricks CLI profile {} isn't set up. If the user meant one of the Databricks CLI profiles listed in profiles, "
-                "ask them which one, and never pick one for them.".format(profile))
+        return ("Databricks CLI profile {0} isn't set up. If the user meant one of the Databricks CLI profiles listed in profiles, "
+                "ask them which one, and never pick one for them. If their workspace has no profile yet, offer to set one up under "
+                "a name they pick (it can be {0}): ask for its workspace URL, such as https://<workspace>.cloud.databricks.com, and "
+                "never guess one. Explain that {1} A browser window will open for them to sign in. Then call genie_setup with the "
+                "URL and the name they picked as profile. The default profile stays as it is.".format(profile, CLI_SIGN_IN))
     if status == "unsupported_auth":
         method = "auth type " + auth_type if auth_type else "no auth type in its config (often a personal access token)"
         return ("Databricks CLI profile {} signs in with {}, not OAuth U2M. Genie in Antigravity signs in with OAuth U2M through "
-                "the Databricks CLI, so it can't use this profile, and genie_setup won't change it. Ask the user which other "
-                "Databricks CLI profile to use, and never change this one for them.".format(profile, method))
+                "the Databricks CLI, so it can't use this profile, and genie_setup won't change it. ".format(profile, method)
+                + separate.format("U2M "))
     if status == "profile_exists_unreadable":
         return ("Databricks CLI profile {} has settings in the Databricks config file that `databricks auth profiles` doesn't list, "
-                "or that file can't be read, so Genie can't tell how it signs in, and genie_setup won't touch it. Ask the user "
-                "which other Databricks CLI profile to use, and never change this one for them.".format(profile))
+                "or that file can't be read, so Genie can't tell how it signs in, and genie_setup won't touch it. ".format(profile)
+                + separate.format(""))
     if status == "login_needed" and url:
-        return ("The sign-in for Databricks CLI profile {0} ({1}) has expired. Ask the user to sign in again in a terminal with "
-                "databricks auth login --profile {0}, then call genie_connection again with profile {0}.".format(profile, url))
+        return ("The sign-in for Databricks CLI profile {0} ({1}) has expired. Tell the user a browser window will open for them to "
+                "sign in again, then call genie_setup with {1} and profile {0}.".format(profile, url))
     if status == "login_in_progress":
         return ("A browser window is open for the user to sign in to {0} (Databricks CLI profile {1}). Ask them to finish signing "
                 "in there, then call genie_connection again with profile {1}. A sign-in left unfinished gives up after {2} "
                 "minutes.".format(url, profile, LOGIN_TIMEOUT_MINUTES))
     if status == "login_failed":
         return ("The sign-in to {0} for Databricks CLI profile {1} didn't finish: it was cancelled in the browser, timed out, or "
-                "failed. Ask the user whether to sign in again in a terminal with databricks auth login --profile {1}."
+                "failed. Ask the user whether to try again, and if so call genie_setup with {0} and profile {1} again."
                 .format(url, profile))
     return next_step(status, profile, host, url, profiles, auth_type)  # the CLI is missing, or the profile has no workspace URL
 
@@ -720,17 +731,20 @@ def setup(arguments, context):
     if state["status"] in ("unsupported_auth", "profile_exists_unreadable"):
         raise BridgeError(state["next_step"])
     own = cli.own_profile()
+    named = context.get("named")  # a profile the call named, so the default is never the one to change
     if own is not None:
         if not own["host"] or urllib.parse.urlsplit(base_url(own["host"])).hostname != urllib.parse.urlsplit(url).hostname:
+            switch = ("ask the user to pick a new profile name, and call genie_setup with it as profile" if named else
+                      "the user can set DATABRICKS_CONFIG_PROFILE to a new profile name and restart Antigravity")
             raise BridgeError(
                 "Databricks CLI profile {} is already set up for {}, and genie_setup never changes which workspace a "
-                "profile points to. To use {}, the user can set DATABRICKS_CONFIG_PROFILE to a new profile name and "
-                "restart Antigravity."
-                .format(cli.profile, base_url(own["host"]) if own["host"] else "no workspace", url))
+                "profile points to. To use {}, {}."
+                .format(cli.profile, base_url(own["host"]) if own["host"] else "no workspace", url, switch))
         if state["status"] == "ready":
             return state
         if own["auth_type"] != U2M:  # signing in again would rewrite the profile and drop its token or client secret
-            raise BridgeError(next_step("unsupported_auth", cli.profile, None, None, None, own["auth_type"]))
+            step = named_next_step if named else next_step
+            raise BridgeError(step("unsupported_auth", cli.profile, None, None, None, own["auth_type"]))
     elif state["status"] == "ready":
         return state
     if not PROFILE_NAME.fullmatch(cli.profile):
@@ -953,7 +967,7 @@ def call_tool(message, context):
                 pass  # the connection's status still stands; only the list to match a workspace by is missing
         return [tool_result(message, json.dumps(state, indent=2))]
     if name == "genie_setup":
-        return [tool_result(message, json.dumps(setup(arguments, context), indent=2))]
+        return [tool_result(message, json.dumps(setup(arguments, workspace_for(context, chosen_profile(arguments))), indent=2))]
     workspace = genie_workspace(context, arguments)
     state = connection(workspace)
     if state["status"] != "ready":
