@@ -4,6 +4,10 @@ Ask Databricks Genie about your governed data from [Google Antigravity](https://
 
 Genie finds the right tables in your Databricks workspace, runs SQL on a SQL warehouse, and answers with the numbers and the SQL it ran. This plugin gives Antigravity's agent that ability, so it asks Genie instead of guessing table names or writing SQL from memory.
 
+[![The 1-minute demo on YouTube](https://img.youtube.com/vi/TZ3BZq7vW-s/hqdefault.jpg)](https://www.youtube.com/watch?v=TZ3BZq7vW-s)
+
+**[Watch the 1-minute demo](https://www.youtube.com/watch?v=TZ3BZq7vW-s)** to see what the plugin can do.
+
 ## What it does
 
 - Gives the Antigravity agent Genie's tools: ask a question in plain language, wait for the answer, fetch complete result rows, follow up in the same conversation, and cancel a slow question.

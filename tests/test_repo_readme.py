@@ -437,3 +437,11 @@ def test_the_security_section_says_where_another_workspaces_token_goes():
     (where,) = [line for line in security.splitlines() if line.startswith("- **Where your token goes:**")]
 
     assert "When you ask in another workspace, that profile's token goes only to that profile's own workspace" in where
+
+
+DEMO_VIDEO = "https://www.youtube.com/watch?v=TZ3BZq7vW-s"
+
+
+def test_the_readme_links_the_one_minute_demo_before_the_first_section():
+    intro = README.read_text().split("\n## ", 1)[0]
+    assert f"[Watch the 1-minute demo]({DEMO_VIDEO})" in intro
