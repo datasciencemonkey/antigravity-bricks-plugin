@@ -65,7 +65,11 @@ BRIDGE_TOOLS = [
             "cli_missing), the Databricks CLI profile, the workspace host, and next_step, which says what to do. When "
             "the profile isn't set up, it also lists the Databricks CLI's other profiles."
         ),
-        "inputSchema": {"type": "object", "properties": {}},
+        "inputSchema": {"type": "object", "properties": {"profile": {
+            "type": "string",
+            "description": ("Optional. A Databricks CLI profile other than the default to check, to ask Genie in its workspace for "
+                            "part of a question. Leave it out for the default profile."),
+        }}},
     },
     {
         "name": "genie_setup",
@@ -87,6 +91,33 @@ BRIDGE_TOOLS = [
         },
     },
 ]
+PROFILE_ARGUMENT = {  # the bridge adds it to each of Genie's tools, and takes it out of each call before Genie gets it
+    "type": "string",
+    "description": (
+        "Optional. The Databricks CLI profile of another workspace to ask, for the part of a question the user asked about "
+        "there. Leave it out for the default profile. Pass the same profile on every follow-up, poll, result and cancel of a "
+        "conversation that started there."
+    ),
+}
+CONVERSATION_ID = re.compile(r"\bconversation_id\W{0,3}[:=]\s*\W{0,2}([A-Za-z0-9][A-Za-z0-9_-]{7,})")
+
+
+def with_profile(tools):
+    """Genie's tools, each with the bridge's optional profile argument in its input schema."""
+    for tool in tools:
+        schema = tool.get("inputSchema") if isinstance(tool, dict) else None
+        if isinstance(schema, dict) and isinstance(schema.setdefault("properties", {}), dict):
+            schema["properties"]["profile"] = dict(PROFILE_ARGUMENT)
+    return tools
+
+
+def without_profile(message):
+    """message as Genie One gets it: a tool call's arguments without the bridge's own profile argument."""
+    params = message.get("params")
+    arguments = params.get("arguments") if isinstance(params, dict) else None
+    if message.get("method") != "tools/call" or not isinstance(arguments, dict) or "profile" not in arguments:
+        return message
+    return {**message, "params": {**params, "arguments": {key: value for key, value in arguments.items() if key != "profile"}}}
 
 
 def genie_url(host):
@@ -233,9 +264,9 @@ def in_time(work, seconds, late=OUT_OF_TIME):
 class DatabricksCli:
     """Everything the bridge needs from Databricks comes from one CLI profile: the workspace and fresh tokens."""
 
-    def __init__(self, env):
+    def __init__(self, env, profile=None):
         self.env = env
-        self.profile = env.get("DATABRICKS_CONFIG_PROFILE") or "DEFAULT"
+        self.profile = profile or env.get("DATABRICKS_CONFIG_PROFILE") or "DEFAULT"
         self.login_hint = "Run: databricks auth login --profile " + self.profile
         self.cached = None  # (token, time to refresh it)
 
@@ -377,7 +408,68 @@ def new_context(env):
         "login_record": None,  # its record, also kept in a private folder in the home folder
         "ready": False,
         "announce_tools": False,  # tell Antigravity its tool list changed once Genie One's own list can be fetched
+        "env": env,  # the environment each profile's Databricks CLI gets, unchanged
+        "workspaces": {},  # the state of each other Databricks CLI profile a tool call named, by name
+        "conversations": {},  # the Databricks CLI profile of each Genie conversation the bridge saw Genie answer in
     }
+
+
+def named_context(context, profile):
+    """The bridge's state for a Databricks CLI profile that a tool call named, next to the default's: its own CLI login, workspace
+    and Genie session. Antigravity's initialize, the environment and a test server's URL are the same for every profile."""
+    state = dict(context, cli=DatabricksCli(context["env"], profile), url=None, session_id=None, session_started=False,
+                 upstream_version=None, login=None, login_record=None, ready=False, announce_tools=False, named=True)
+    del state["workspaces"], state["conversations"]  # only the default's state keeps them
+    return state
+
+
+def workspace_for(context, profile):
+    """The state for profile: the default's when profile is None or the default's own name, else that profile's own."""
+    if profile is None or profile == context["cli"].profile:
+        return context
+    if profile not in context["workspaces"]:
+        context["workspaces"][profile] = named_context(context, profile)
+    return context["workspaces"][profile]
+
+
+def chosen_profile(arguments):
+    """The Databricks CLI profile a tool call names, or None for the default. The name goes to the CLI, so it has to be one its
+    config can hold."""
+    profile = arguments.get("profile")
+    if profile is None or (isinstance(profile, str) and not profile.strip()):
+        return None
+    if isinstance(profile, str) and PROFILE_NAME.fullmatch(profile.strip()):
+        return profile.strip()
+    raise BridgeError(
+        "profile has to be the name of a Databricks CLI profile, such as one genie_connection lists: letters, digits, '.', '_' "
+        "and '-', up to 64 of them. Leave it out for the default profile, and never pick one for the user.")
+
+
+def genie_workspace(context, arguments):
+    """Where a call to one of Genie's tools goes: the profile it names, else the profile its conversation started in, once the
+    bridge has seen Genie answer there, else the default. A conversation stays in its workspace, so naming another profile for
+    it is refused."""
+    profile = chosen_profile(arguments)
+    conversation = arguments.get("conversation_id")
+    started = context["conversations"].get(conversation) if isinstance(conversation, str) else None
+    if profile is not None and started is not None and profile != started:
+        raise BridgeError(
+            "Genie conversation {0} started in Databricks CLI profile {1}, and a conversation stays in its workspace: pass "
+            "profile {1} to go on with it. To ask in Databricks CLI profile {2}, start a new conversation there, without "
+            "conversation_id.".format(conversation, started, profile))
+    return workspace_for(context, profile or started)
+
+
+def conversation_in(result):
+    """The conversation_id that a Genie answer names, in its structuredContent or else in its text, or None."""
+    structured = result.get("structuredContent")
+    if isinstance(structured, dict) and isinstance(structured.get("conversation_id"), str) and structured["conversation_id"]:
+        return structured["conversation_id"]
+    for item in result.get("content") if isinstance(result.get("content"), list) else []:
+        found = CONVERSATION_ID.search(item["text"]) if isinstance(item, dict) and isinstance(item.get("text"), str) else None
+        if found:
+            return found.group(1)
+    return None
 
 
 def login_folder(create=False):
@@ -527,6 +619,38 @@ def next_step(status, profile, host, url, profiles, auth_type=None):
             "whether to try again, and if so call genie_setup with {} again.".format(url, url))
 
 
+def named_next_step(status, profile, host, url, profiles, auth_type=None):
+    """next_step for a Databricks CLI profile that a tool call named. It's for that part of the question only, so nothing here
+    changes the default profile."""
+    if status == "ready":
+        return ("Before each genie_ask, tell the user \"Asking Genie in {0} (Databricks CLI profile {1})\", and pass profile {1} on "
+                "every Genie call for this part of the question, follow-ups and polls included.".format(host, profile))
+    if status == "not_configured":
+        return ("Databricks CLI profile {} isn't set up. If the user meant one of the Databricks CLI profiles listed in profiles, "
+                "ask them which one, and never pick one for them.".format(profile))
+    if status == "unsupported_auth":
+        method = "auth type " + auth_type if auth_type else "no auth type in its config (often a personal access token)"
+        return ("Databricks CLI profile {} signs in with {}, not OAuth U2M. Genie in Antigravity signs in with OAuth U2M through "
+                "the Databricks CLI, so it can't use this profile, and genie_setup won't change it. Ask the user which other "
+                "Databricks CLI profile to use, and never change this one for them.".format(profile, method))
+    if status == "profile_exists_unreadable":
+        return ("Databricks CLI profile {} has settings in the Databricks config file that `databricks auth profiles` doesn't list, "
+                "or that file can't be read, so Genie can't tell how it signs in, and genie_setup won't touch it. Ask the user "
+                "which other Databricks CLI profile to use, and never change this one for them.".format(profile))
+    if status == "login_needed" and url:
+        return ("The sign-in for Databricks CLI profile {0} ({1}) has expired. Ask the user to sign in again in a terminal with "
+                "databricks auth login --profile {0}, then call genie_connection again with profile {0}.".format(profile, url))
+    if status == "login_in_progress":
+        return ("A browser window is open for the user to sign in to {0} (Databricks CLI profile {1}). Ask them to finish signing "
+                "in there, then call genie_connection again with profile {1}. A sign-in left unfinished gives up after {2} "
+                "minutes.".format(url, profile, LOGIN_TIMEOUT_MINUTES))
+    if status == "login_failed":
+        return ("The sign-in to {0} for Databricks CLI profile {1} didn't finish: it was cancelled in the browser, timed out, or "
+                "failed. Ask the user whether to sign in again in a terminal with databricks auth login --profile {1}."
+                .format(url, profile))
+    return next_step(status, profile, host, url, profiles, auth_type)  # the CLI is missing, or the profile has no workspace URL
+
+
 def report(context, status, host=None, profiles=None, auth_type=None):
     """genie_connection's answer. host is the profile's or the sign-in's workspace; a URL override wins for display."""
     cli = context["cli"]
@@ -534,8 +658,9 @@ def report(context, status, host=None, profiles=None, auth_type=None):
         shown = display_host(context["url"])
     else:
         shown = display_host(context["override"] or (genie_url(host) if host else None))
+    step = named_next_step if context.get("named") else next_step
     result = {"status": status, "profile": cli.profile, "host": shown,
-              "next_step": next_step(status, cli.profile, shown, base_url(host) if host else None, profiles, auth_type)}
+              "next_step": step(status, cli.profile, shown, base_url(host) if host else None, profiles, auth_type)}
     if profiles is not None:
         result["profiles"] = profiles
     return result
@@ -646,11 +771,12 @@ def exchange(request, timeout):
         return error.code, error.headers, error.read().decode(errors="replace")
 
 
-def late_text(message, seconds):
+def late_text(message, seconds, profile=None):
     """What to tell the agent when Genie didn't answer message in time. The request may have reached Genie, which keeps working
     on a question after the bridge gives up, so asking again starts a duplicate. A poll gets its IDs back to poll again with. A
     question that was just asked has none, because they come in the reply that never arrived; a follow-up has its conversation,
-    which can be cancelled first. Fetching a result or cancelling starts nothing, so those just say to try again."""
+    which can be cancelled first. Fetching a result or cancelling starts nothing, so those just say to try again. profile is a
+    Databricks CLI profile the call went to other than the default, which the next call has to name again."""
     params = message.get("params") if isinstance(message.get("params"), dict) else {}
     arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
     conversation, response = (value if isinstance(value, str) and value else None
@@ -658,13 +784,14 @@ def late_text(message, seconds):
     text = "Genie didn't answer within {} seconds, so this call ran out of time.".format(seconds)
     if params.get("name") == "genie_poll_response" and conversation and response:
         return text + (" Genie may still be working on it, and asking the question again would start a duplicate: call "
-                       "genie_poll_response again with conversation_id {} and response_id {}.".format(conversation, response))
+                       "genie_poll_response again with conversation_id {} and response_id {}{}.".format(
+                           conversation, response, ", and profile " + profile if profile else ""))
     if params.get("name") == "genie_ask":
         text += (" Genie may still be working on the question, but no response_id came back to poll with, and asking again "
                  "starts a duplicate question.")
         if conversation:
-            return text + (" To stop the follow-up first, call genie_cancel_response with conversation_id {}. Then wait a "
-                           "minute or two, and try again.".format(conversation))
+            return text + (" To stop the follow-up first, call genie_cancel_response with conversation_id {}{}. Then wait a "
+                           "minute or two, and try again.".format(conversation, " and profile " + profile if profile else ""))
         return text + " Wait a minute or two, then try again."
     return text + " Try again."
 
@@ -682,10 +809,11 @@ def forward(message, context):
             headers["Mcp-Session-Id"] = session
         if context.get("upstream_version"):
             headers["MCP-Protocol-Version"] = context["upstream_version"]
-        request = urllib.request.Request(context["url"], data=json.dumps(message).encode(), headers=headers, method="POST")
+        request = urllib.request.Request(context["url"], data=json.dumps(without_profile(message)).encode(), headers=headers,
+                                         method="POST")
         host = display_host(context["url"])
         timeout = time_left(UPSTREAM_TIMEOUT_SECONDS)
-        late = late_text(message, int(timeout))
+        late = late_text(message, int(timeout), context["cli"].profile if context.get("named") else None)
         unreachable = "Couldn't reach Genie at {}: {}. Check the network connection, and connect to the VPN if the workspace needs one."
         try:
             status, response_headers, text = in_time(lambda: exchange(request, timeout), timeout, late)
@@ -800,28 +928,33 @@ def list_tools(message, context):
             replies = call_upstream(message, context)
             result = matching_result(replies, message)
             if result is not None and isinstance(result.get("tools"), list):
-                result["tools"] = result["tools"] + BRIDGE_TOOLS
+                result["tools"] = with_profile(result["tools"]) + BRIDGE_TOOLS
                 return replies
             sys.stderr.write("Genie One answered tools/list with an error or nothing, so the bundled list stands in.\n")
     except Exception as error:  # whatever it was, the tools still show up, and calling one says what's wrong
         sys.stderr.write("Listing Genie One's tools failed, so the bundled list stands in: {}\n".format(describe(error)))
     context["announce_tools"] = True
-    return [{"jsonrpc": "2.0", "id": message.get("id"), "result": {"tools": genie_tools() + BRIDGE_TOOLS}}]
+    return [{"jsonrpc": "2.0", "id": message.get("id"), "result": {"tools": with_profile(genie_tools()) + BRIDGE_TOOLS}}]
 
 
 def call_tool(message, context):
     params = message.get("params") if isinstance(message.get("params"), dict) else {}
     name = params.get("name")
+    arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
     if name == "genie_connection":
-        return [tool_result(message, json.dumps(connection(context), indent=2))]
+        return [tool_result(message, json.dumps(connection(workspace_for(context, chosen_profile(arguments))), indent=2))]
     if name == "genie_setup":
-        arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
         return [tool_result(message, json.dumps(setup(arguments, context), indent=2))]
-    state = connection(context)
+    workspace = genie_workspace(context, arguments)
+    state = connection(workspace)
     if state["status"] != "ready":
         raise not_ready(state)  # never sent to Genie
-    replies = call_upstream(message, context)
+    replies = call_upstream(message, workspace)
     result = matching_result(replies, message)
+    if name in ("genie_ask", "genie_poll_response") and result is not None and not result.get("isError"):
+        conversation = conversation_in(result)
+        if conversation:  # Genie answered in this workspace, so its follow-ups and polls go here too
+            context["conversations"][conversation] = workspace["cli"].profile
     if name == "genie_ask" and result is not None and isinstance(result.get("content"), list):
         result["content"].append({"type": "text", "text": "Asked Genie in {} (Databricks CLI profile {})".format(state["host"], state["profile"])})
     return replies

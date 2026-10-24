@@ -2367,3 +2367,267 @@ def test_pinned_errors_from_genie_setup_and_from_a_question_before_setup(start, 
         "separate U2M profile: " + PINNED_SEPARATE_PROFILE))
     assert ask == pinned_error(3, "Genie isn't connected yet (not_configured). " + pinned_not_configured_step("NEW", False))
     assert cli.logins() == [] and genie.requests == []
+
+
+# Naming a Databricks CLI profile on a call (#49): that part of a question goes to the profile's own workspace, with the profile's
+# own token and its own Genie session, and the default profile stays as it is.
+
+
+@pytest.fixture
+def other():
+    """A second workspace's Genie, for a profile other than the default."""
+    fake = FakeGenie()
+    yield fake
+    fake.server.shutdown()
+
+
+def genie_in(fake, session, conversation):
+    """Make fake answer like a workspace's Genie One: with a session of its own, and tool results that name conversation."""
+    def reply(request):
+        body = request["body"]
+        if body.get("method") != "tools/call":
+            return 200, {**JSON, "Mcp-Session-Id": session}, json.dumps({"jsonrpc": "2.0", "id": body.get("id"), "result": {}})
+        return 200, JSON, json.dumps({"jsonrpc": "2.0", "id": body["id"], "result": {
+            "content": [{"type": "text", "text": "status: in_progress"}],
+            "structuredContent": {"conversation_id": conversation, "response_id": "r-" + conversation, "status": "in_progress"}}})
+
+    fake.reply = reply
+
+
+def two_workspaces(cli, genie, other, b=None):
+    """The default profile DEMO on genie, and profile B on other (or b, a (host, auth type) pair, in its place)."""
+    genie_in(genie, "session-default", "c-default")
+    genie_in(other, "session-b", "c-b")
+    cli.set_profiles({"DEMO": genie.base, "B": b or other.base})
+
+
+NAMED_TOOLS = GENIE_TOOLS + ["genie_connection"]
+
+
+def test_genies_tools_and_genie_connection_take_an_optional_profile_before_and_after_sign_in(start, genie, cli):
+    cli.set_profiles({})
+    first_use = start(DATABRICKS_CONFIG_PROFILE="NEW")
+    first_use.send(TOOLS_LIST)
+    bundled = first_use.reply()["result"]["tools"]
+    live = [{"name": "genie_ask", "description": "live", "inputSchema": {"type": "object", "properties": {"question": {"type": "string"}},
+                                                                      "required": ["question"]}},
+            {"name": "view_ask", "description": "live", "inputSchema": {"type": "object"}}]
+    genie.reply = lambda request: (200, JSON, json.dumps({"jsonrpc": "2.0", "id": request["body"].get("id"),
+                                                          "result": {"tools": live}}))
+    cli.set_profiles({"DEMO": WORKSPACE})
+    ready = start()
+    ready.send(TOOLS_LIST)
+    connected = ready.reply()["result"]["tools"]
+
+    named = [tool for tool in bundled if tool["name"] in NAMED_TOOLS] + [tool for tool in connected if tool["name"] != "genie_setup"]
+    assert sorted(tool["name"] for tool in named) == sorted(NAMED_TOOLS + ["genie_ask", "view_ask", "genie_connection"])
+    for tool in named:
+        profile = tool["inputSchema"]["properties"]["profile"]
+        assert profile["type"] == "string" and "Databricks CLI profile" in profile["description"], tool["name"]
+        assert "profile" not in tool["inputSchema"].get("required", []), tool["name"]
+
+
+def test_a_named_profile_asks_genie_in_its_own_workspace_with_its_own_token_and_session(start, genie, other, cli):
+    two_workspaces(cli, genie, other)
+    bridge = start(GENIE_MCP_URL="")
+    bridge.send(call("genie_ask", {"question": "Pipeline in the sales workspace?", "profile": "B"}))
+    in_b = bridge.reply()
+    bridge.send(call("genie_ask", {"question": "Revenue last quarter?"}, number=4))
+    in_default = bridge.reply()
+
+    assert text_of(in_b).endswith(f"Asked Genie in {other.host} (Databricks CLI profile B)")
+    assert text_of(in_default).endswith(f"Asked Genie in {genie.host} (Databricks CLI profile DEMO)")  # the default never changes
+    assert other.methods() == ["initialize", "notifications/initialized", "tools/call"]
+    assert other.requests[-1]["body"] == call("genie_ask", {"question": "Pipeline in the sales workspace?"})  # profile taken out
+    assert genie.requests[-1]["body"] == call("genie_ask", {"question": "Revenue last quarter?"}, number=4)
+    assert {request["path"] for request in other.requests + genie.requests} == {GENIE_ONE_PATH}
+    assert {request["headers"]["authorization"] for request in other.requests} == {"Bearer tok-1"}
+    assert {request["headers"]["authorization"] for request in genie.requests} == {"Bearer tok-2"}
+    assert [request["headers"].get("mcp-session-id") for request in other.requests] == [None, "session-b", "session-b"]
+    assert [request["headers"].get("mcp-session-id") for request in genie.requests] == [None, "session-default", "session-default"]
+    assert [line for line in cli.calls() if line.startswith("auth token")] == ["auth token --profile B --output json",
+                                                                               "auth token --profile DEMO --output json"]
+    assert cli.variables() == {"DATABRICKS_CONFIG_FILE", "DATABRICKS_CONFIG_PROFILE"}  # the CLI's environment, unchanged
+
+
+@pytest.mark.parametrize("profile", [None, "", "  ", "DEMO"])
+def test_a_profile_left_out_left_empty_or_naming_the_default_is_the_default(start, genie, cli, profile):
+    genie.reply = tool_reply("status: in_progress")
+    bridge = start()
+    bridge.send(call("genie_ask", {"question": "Revenue last quarter?", "profile": profile}))
+    ask = bridge.reply()
+
+    assert text_of(ask).endswith(f"Asked Genie in {genie.host} (Databricks CLI profile DEMO)")
+    assert genie.requests[-1]["body"] == call("genie_ask", {"question": "Revenue last quarter?"})
+    assert cli.calls() == ["auth token --profile DEMO --output json"]
+
+
+def test_follow_ups_polls_results_and_cancels_go_to_the_workspace_where_the_conversation_started(start, genie, other, cli):
+    two_workspaces(cli, genie, other)
+    bridge = start(GENIE_MCP_URL="")
+    bridge.send(call("genie_ask", {"question": "Pipeline?", "profile": "B"}))
+    bridge.reply()
+    later = [call("genie_poll_response", {"conversation_id": "c-b", "response_id": "r-c-b"}, number=4),
+             call("genie_get_query_result", {"conversation_id": "c-b", "response_id": "r-c-b", "item_id": "i-1"}, number=5),
+             call("genie_ask", {"question": "By region?", "conversation_id": "c-b"}, number=6),
+             call("genie_cancel_response", {"conversation_id": "c-b"}, number=7)]
+    for message in later:  # none of them names the profile again
+        bridge.send(message)
+        bridge.reply()
+
+    assert [request["body"] for request in other.requests[3:]] == later
+    assert genie.requests == []
+
+
+def test_a_conversation_named_only_in_the_text_of_genies_answer_is_remembered_too(start, genie, other, cli):
+    conversation = "01f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4"
+    two_workspaces(cli, genie, other)
+    other.reply = tool_reply(f"Asking Genie now.\n\nconversation_id: `{conversation}`\nresponse_id: `r-1`\nstatus: in_progress")
+    bridge = start(GENIE_MCP_URL="")
+    bridge.send(call("genie_ask", {"question": "Pipeline?", "profile": "B"}))
+    bridge.reply()
+    bridge.send(call("genie_poll_response", {"conversation_id": conversation, "response_id": "r-1"}, number=4))
+    bridge.reply()
+
+    assert other.requests[-1]["body"]["params"]["name"] == "genie_poll_response"
+    assert genie.requests == []
+
+
+def test_a_poll_that_names_its_profile_goes_there_from_a_bridge_that_never_saw_the_question(start, genie, other, cli):
+    # `agy -p` starts a new bridge for each turn, so the skill passes the same profile on every call of a conversation.
+    two_workspaces(cli, genie, other)
+    bridge = start(GENIE_MCP_URL="")
+    bridge.send(call("genie_poll_response", {"conversation_id": "c-b", "response_id": "r-c-b", "profile": "B"}))
+    bridge.reply()
+
+    assert other.requests[-1]["body"] == call("genie_poll_response", {"conversation_id": "c-b", "response_id": "r-c-b"})
+    assert genie.requests == []
+
+
+def test_a_conversation_stays_in_its_workspace_when_a_call_names_another_profile_for_it(start, genie, other, cli):
+    two_workspaces(cli, genie, other)
+    bridge = start(GENIE_MCP_URL="")
+    bridge.send(call("genie_ask", {"question": "Pipeline?", "profile": "B"}))
+    bridge.reply()
+    bridge.send(call("genie_poll_response", {"conversation_id": "c-b", "response_id": "r-c-b", "profile": "DEMO"}, number=4))
+    reply = bridge.reply()
+
+    assert reply["result"]["isError"] is True
+    assert "c-b" in text_of(reply) and "Databricks CLI profile B" in text_of(reply)
+    assert genie.requests == [] and len(other.requests) == 3
+
+
+def test_genie_connection_reports_a_named_profiles_workspace_and_says_to_pass_the_profile_on_each_call(start, genie, other, cli):
+    two_workspaces(cli, genie, other)
+    bridge = start(GENIE_MCP_URL="")
+    bridge.send(call("genie_connection", {"profile": "B"}))
+    named = report_of(bridge.reply())
+    _, default = bridge.connection(4)
+
+    assert (named["status"], named["profile"], named["host"]) == ("ready", "B", other.host)
+    assert f"Asking Genie in {other.host} (Databricks CLI profile B)" in named["next_step"]
+    assert "pass profile B" in named["next_step"]
+    assert (default["status"], default["profile"], default["host"]) == ("ready", "DEMO", genie.host)
+    assert genie.requests == [] and other.requests == []
+
+
+def test_a_profile_the_cli_does_not_have_is_not_configured_and_nothing_reaches_genie(start, genie, cli):
+    cli.set_profiles({"DEMO": genie.base, "dev": workspace("dev-workspace")})
+    before = cli.config.read_text()
+    bridge = start(GENIE_MCP_URL="")
+    bridge.send(call("genie_connection", {"profile": "sales"}))
+    report = report_of(bridge.reply())
+    bridge.send(call("genie_ask", {"question": "Pipeline?", "profile": "sales"}, number=4))
+    ask = bridge.reply()
+    _, default = bridge.connection(5)
+    time.sleep(0.3)
+
+    assert (report["status"], report["profile"], report["host"]) == ("not_configured", "sales", None)
+    assert "sales" in report["next_step"] and "never pick" in report["next_step"]
+    assert "DATABRICKS_CONFIG_PROFILE" not in report["next_step"]  # the default never changes
+    assert [profile["name"] for profile in report["profiles"]] == ["DEMO", "dev"]
+    assert ask["result"]["isError"] is True and "not_configured" in text_of(ask)
+    assert (default["status"], default["profile"]) == ("ready", "DEMO")
+    assert genie.requests == [] and cli.logins() == [] and cli.config.read_text() == before
+
+
+@pytest.mark.parametrize("auth_type", ["pat", "oauth-m2m", ""])
+def test_a_named_profile_that_signs_in_another_way_is_unsupported_auth_and_never_touched(start, genie, other, cli, auth_type):
+    two_workspaces(cli, genie, other, b=(WORKSPACE, auth_type))
+    before = cli.config.read_text()
+    bridge = start(GENIE_MCP_URL="")
+    bridge.send(call("genie_connection", {"profile": "B"}))
+    report = report_of(bridge.reply())
+    bridge.send(call("genie_ask", {"question": "Pipeline?", "profile": "B"}, number=4))
+    ask = bridge.reply()
+    time.sleep(0.3)
+
+    assert (report["status"], report["profile"]) == ("unsupported_auth", "B")
+    assert "OAuth U2M" in report["next_step"] and "DATABRICKS_CONFIG_PROFILE" not in report["next_step"]
+    assert ask["result"]["isError"] is True and "unsupported_auth" in text_of(ask)
+    assert genie.requests == [] and other.requests == []
+    assert cli.logins() == [] and cli.config.read_text() == before
+
+
+def test_a_named_profile_the_cli_hides_is_profile_exists_unreadable_and_never_touched(start, genie, cli):
+    cli.set_profiles({"DEMO": genie.base}, extra=azure_service_principal("SP"))
+    before = cli.config.read_text()
+    bridge = start(GENIE_MCP_URL="")
+    bridge.send(call("genie_connection", {"profile": "SP"}))
+    report = report_of(bridge.reply())
+    time.sleep(0.3)
+
+    assert (report["status"], report["profile"]) == ("profile_exists_unreadable", "SP")
+    assert "DATABRICKS_CONFIG_PROFILE" not in report["next_step"]
+    assert SECRET not in json.dumps(report)
+    assert genie.requests == [] and cli.logins() == [] and cli.config.read_text() == before
+
+
+def test_a_named_profile_whose_sign_in_has_expired_is_login_needed_for_its_own_workspace(start, genie, other, cli):
+    two_workspaces(cli, genie, other)
+    bridge = start(GENIE_MCP_URL="", FAKE_CLI_FAIL="1")
+    bridge.send(call("genie_connection", {"profile": "B"}))
+    report = report_of(bridge.reply())
+
+    assert (report["status"], report["profile"]) == ("login_needed", "B")
+    assert other.base in report["next_step"] and "DATABRICKS_CONFIG_PROFILE" not in report["next_step"]
+    assert cli.logins() == [] and other.requests == []
+
+
+@pytest.mark.parametrize("profile", ["-x", "two words", "a]b", "x" * 65, 42, ["B"]])
+def test_a_profile_name_the_cli_config_cannot_safely_hold_is_refused_before_the_cli_or_genie_sees_it(start, genie, cli, profile):
+    bridge = start()
+    bridge.send(call("genie_ask", {"question": "Pipeline?", "profile": profile}))
+    ask = bridge.reply()
+    bridge.send(call("genie_connection", {"profile": profile}, number=4))
+    connection = bridge.reply()
+
+    assert ask["result"]["isError"] is True and connection["result"]["isError"] is True
+    assert "profile" in text_of(ask) and "never pick" in text_of(ask)
+    assert cli.calls() == [] and genie.requests == []
+
+
+class NamedFakeCli(FakeCli):
+    def __init__(self, profile):
+        self.profile = profile
+        self.login_hint = "Run: databricks auth login --profile " + profile
+
+
+def timed_out_in_profile_b(monkeypatch, capsys, loaded, name, arguments):
+    context = short_limit(loaded, monkeypatch, {"GENIE_MCP_URL": LOOPBACK}, 2)
+    loaded.workspace_for(context, "B")["cli"] = NamedFakeCli("B")
+    never_answers_tool_calls(monkeypatch, loaded, "hangs")
+    loaded.handle(json.dumps(call(name, {**arguments, "profile": "B"})), context)
+    return text_of(json.loads(capsys.readouterr().out))
+
+
+def test_a_poll_in_a_named_profile_that_times_out_says_to_poll_again_with_the_same_profile(monkeypatch, capsys, loaded):
+    message = timed_out_in_profile_b(monkeypatch, capsys, loaded, "genie_poll_response", POLL)
+
+    assert "genie_poll_response again with conversation_id c-1 and response_id r-1, and profile B" in message
+
+
+def test_a_follow_up_in_a_named_profile_that_times_out_says_to_cancel_it_in_the_same_profile(monkeypatch, capsys, loaded):
+    message = timed_out_in_profile_b(monkeypatch, capsys, loaded, "genie_ask", {"question": "By region?", "conversation_id": "c-1"})
+
+    assert "genie_cancel_response with conversation_id c-1 and profile B" in message
